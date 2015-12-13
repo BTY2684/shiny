@@ -1,12 +1,16 @@
 #' @include utils.R
 NULL
 
-Dependents <- setRefClass(
+Dependents <- R6Class(
   'Dependents',
-  fields = list(
-    .dependents = 'Map'
-  ),
-  methods = list(
+  portable = FALSE,
+  class = FALSE,
+  public = list(
+    .dependents = 'Map',
+
+    initialize = function() {
+      .dependents <<- Map$new()
+    },
     register = function(depId=NULL, depLabel=NULL) {
       ctx <- .getReactiveEnvironment()$currentContext()
       if (!.dependents$containsKey(ctx$id)) {
@@ -36,11 +40,12 @@ Dependents <- setRefClass(
 
 # ReactiveValues ------------------------------------------------------------
 
-ReactiveValues <- setRefClass(
+ReactiveValues <- R6Class(
   'ReactiveValues',
-  fields = list(
+  portable = FALSE,
+  public = list(
     # For debug purposes
-    .label = 'character',
+    .label = character(0),
     .values = 'environment',
     .dependents = 'environment',
     # Dependents for the list of all names, including hidden
@@ -48,15 +53,17 @@ ReactiveValues <- setRefClass(
     # Dependents for all values, including hidden
     .allValuesDeps = 'Dependents',
     # Dependents for all values
-    .valuesDeps = 'Dependents'
-  ),
-  methods = list(
+    .valuesDeps = 'Dependents',
+
     initialize = function() {
       .label <<- paste('reactiveValues',
                        p_randomInt(1000, 10000),
                        sep="")
       .values <<- new.env(parent=emptyenv())
       .dependents <<- new.env(parent=emptyenv())
+      .namesDeps <<- Dependents$new()
+      .allValuesDeps <<- Dependents$new()
+      .valuesDeps <<- Dependents$new()
     },
     get = function(key) {
       ctx <- .getReactiveEnvironment()$currentContext()
@@ -114,7 +121,7 @@ ReactiveValues <- setRefClass(
     mset = function(lst) {
       lapply(base::names(lst),
              function(name) {
-               .self$set(name, lst[[name]])
+               self$set(name, lst[[name]])
              })
     },
     names = function() {
@@ -145,11 +152,12 @@ ReactiveValues <- setRefClass(
 
 #' Create an object for storing reactive values
 #'
-#' This function returns an object for storing reactive values. It is similar
-#' to a list, but with special capabilities for reactive programming. When you
-#' read a value from it, the calling reactive expression takes a reactive
-#' dependency on that value, and when you write to it, it notifies any reactive
-#' functions that depend on that value.
+#' This function returns an object for storing reactive values. It is similar to
+#' a list, but with special capabilities for reactive programming. When you read
+#' a value from it, the calling reactive expression takes a reactive dependency
+#' on that value, and when you write to it, it notifies any reactive functions
+#' that depend on that value. Note that values taken from the reactiveValues
+#' object are reactive, but the reactiveValues object itself is not.
 #'
 #' @examples
 #' # Create the object with no values
@@ -192,15 +200,28 @@ reactiveValues <- function(...) {
   values
 }
 
-# Register the S3 class so that it can be used for a field in a Reference Class
-setOldClass("reactivevalues")
+checkName <- function(x) {
+  if (!is.character(x) || length(x) != 1) {
+    stop("Must use single string to index into reactivevalues")
+  }
+}
 
 # Create a reactivevalues object
 #
 # @param values A ReactiveValues object
 # @param readonly Should this object be read-only?
-.createReactiveValues <- function(values = NULL, readonly = FALSE) {
-  structure(list(impl=values), class='reactivevalues', readonly=readonly)
+# @param ns A namespace function (either `identity` or `NS(namespace)`)
+.createReactiveValues <- function(values = NULL, readonly = FALSE,
+  ns = identity) {
+
+  structure(
+    list(
+      impl = values,
+      readonly = readonly,
+      ns = ns
+    ),
+    class='reactivevalues'
+  )
 }
 
 #' Checks whether an object is a reactivevalues object
@@ -214,7 +235,8 @@ is.reactivevalues <- function(x) inherits(x, 'reactivevalues')
 
 #' @export
 `$.reactivevalues` <- function(x, name) {
-  .subset2(x, 'impl')$get(name)
+  checkName(name)
+  .subset2(x, 'impl')$get(.subset2(x, 'ns')(name))
 }
 
 #' @export
@@ -222,14 +244,12 @@ is.reactivevalues <- function(x) inherits(x, 'reactivevalues')
 
 #' @export
 `$<-.reactivevalues` <- function(x, name, value) {
-  if (attr(x, 'readonly')) {
+  if (.subset2(x, 'readonly')) {
     stop("Attempted to assign value to a read-only reactivevalues object")
-  } else if (length(name) != 1 || !is.character(name)) {
-    stop("Must use single string to index into reactivevalues")
-  } else {
-    .subset2(x, 'impl')$set(name, value)
-    x
   }
+  checkName(name)
+  .subset2(x, 'impl')$set(.subset2(x, 'ns')(name), value)
+  x
 }
 
 #' @export
@@ -247,7 +267,13 @@ is.reactivevalues <- function(x) inherits(x, 'reactivevalues')
 
 #' @export
 names.reactivevalues <- function(x) {
-  .subset2(x, 'impl')$names()
+  prefix <- .subset2(x, 'ns')("")
+  results <- .subset2(x, 'impl')$names()
+  if (nzchar(prefix)) {
+    results <- results[substring(results, 1, nchar(prefix)) == prefix]
+    results <- substring(results, nchar(prefix) + 1)
+  }
+  results
 }
 
 #' @export
@@ -302,40 +328,44 @@ reactiveValuesToList <- function(x, all.names=FALSE) {
 # x[['impl']].
 #' @export
 str.reactivevalues <- function(object, indent.str = " ", ...) {
-  str(unclass(object), indent.str = indent.str, ...)
+  utils::str(unclass(object), indent.str = indent.str, ...)
   # Need to manually print out the class field,
   cat(indent.str, '- attr(*, "class")=', sep = "")
-  str(class(object))
+  utils::str(class(object))
 }
 
 # Observable ----------------------------------------------------------------
 
-Observable <- setRefClass(
+Observable <- R6Class(
   'Observable',
-  fields = list(
+  portable = FALSE,
+  public = list(
     .func = 'function',
-    .label = 'character',
-    .domain = 'ANY',
+    .label = character(0),
+    .domain = NULL,
     .dependents = 'Dependents',
-    .invalidated = 'logical',
-    .running = 'logical',
-    .value = 'ANY',
-    .visible = 'logical',
-    .execCount = 'integer',
-    .mostRecentCtxId = 'character'
-  ),
-  methods = list(
+    .invalidated = logical(0),
+    .running = logical(0),
+    .value = NULL,
+    .visible = logical(0),
+    .execCount = integer(0),
+    .mostRecentCtxId = character(0),
+
     initialize = function(func, label = deparse(substitute(func)),
-                          domain = getDefaultReactiveDomain()) {
+                          domain = getDefaultReactiveDomain(),
+                          ..stacktraceon = TRUE) {
       if (length(formals(func)) > 0)
         stop("Can't make a reactive expression from a function that takes one ",
              "or more parameters; only functions without parameters can be ",
              "reactive.")
-      .func <<- func
-      .invalidated <<- TRUE
-      .running <<- FALSE
+
+      .func <<- wrapFunctionLabel(func, paste("reactive", label),
+        ..stacktraceon = ..stacktraceon)
       .label <<- label
       .domain <<- domain
+      .dependents <<- Dependents$new()
+      .invalidated <<- TRUE
+      .running <<- FALSE
       .execCount <<- 0L
       .mostRecentCtxId <<- ""
     },
@@ -343,13 +373,16 @@ Observable <- setRefClass(
       .dependents$register()
 
       if (.invalidated || .running) {
-        .self$.updateValue()
+        ..stacktraceoff..(
+          self$.updateValue()
+        )
       }
 
       .graphDependsOnId(getCurrentContext()$id, .mostRecentCtxId)
 
-      if (identical(class(.value), 'try-error'))
+      if (identical(class(.value), 'try-error')) {
         stop(attr(.value, 'condition'))
+      }
 
       if (.visible)
         .value
@@ -373,9 +406,32 @@ Observable <- setRefClass(
       on.exit(.running <<- wasRunning)
 
       ctx$run(function() {
-        result <- withVisible(try(shinyCallingHandlers(.func()), silent=TRUE))
-        .visible <<- result$visible
+        result <- withCallingHandlers(
+
+          withVisible(.func()),
+
+          error = function(cond) {
+            # If an error occurs, we want to propagate the error, but we also
+            # want to save a copy of it, so future callers of this reactive will
+            # get the same error (i.e. the error is cached).
+
+            # We stripStackTrace in the next line, just in case someone
+            # downstream of us (i.e. deeper into the call stack) used
+            # captureStackTraces; otherwise the entire stack would always be the
+            # same (i.e. you'd always see the whole stack trace of the *first*
+            # time the code was run and the condition raised; there'd be no way
+            # to see the stack trace of the call site that caused the cached
+            # exception to be re-raised, and you need that information to figure
+            # out what's triggering the re-raise).
+            #
+            # We use try(stop()) as an easy way to generate a try-error object
+            # out of this condition.
+            .value <<- try(stop(stripStackTrace(cond)), silent = TRUE)
+            .visible <<- FALSE
+          }
+        )
         .value <<- result$value
+        .visible <<- result$visible
       })
     }
   )
@@ -386,27 +442,29 @@ Observable <- setRefClass(
 #' Wraps a normal expression to create a reactive expression. Conceptually, a
 #' reactive expression is a expression whose result will change over time.
 #'
-#' Reactive expressions are expressions that can read reactive values and call other
-#' reactive expressions. Whenever a reactive value changes, any reactive expressions
-#' that depended on it are marked as "invalidated" and will automatically
-#' re-execute if necessary. If a reactive expression is marked as invalidated, any
-#' other reactive expressions that recently called it are also marked as
-#' invalidated. In this way, invalidations ripple through the expressions that
-#' depend on each other.
+#' Reactive expressions are expressions that can read reactive values and call
+#' other reactive expressions. Whenever a reactive value changes, any reactive
+#' expressions that depended on it are marked as "invalidated" and will
+#' automatically re-execute if necessary. If a reactive expression is marked as
+#' invalidated, any other reactive expressions that recently called it are also
+#' marked as invalidated. In this way, invalidations ripple through the
+#' expressions that depend on each other.
 #'
 #' See the \href{http://rstudio.github.com/shiny/tutorial/}{Shiny tutorial} for
 #' more information about reactive expressions.
 #'
 #' @param x For \code{reactive}, an expression (quoted or unquoted). For
 #'   \code{is.reactive}, an object to test.
-#' @param env The parent environment for the reactive expression. By default, this
-#'   is the calling environment, the same as when defining an ordinary
+#' @param env The parent environment for the reactive expression. By default,
+#'   this is the calling environment, the same as when defining an ordinary
 #'   non-reactive expression.
 #' @param quoted Is the expression quoted? By default, this is \code{FALSE}.
 #'   This is useful when you want to use an expression that is stored in a
-#'   variable; to do so, it must be quoted with `quote()`.
+#'   variable; to do so, it must be quoted with \code{quote()}.
 #' @param label A label for the reactive expression, useful for debugging.
 #' @param domain See \link{domains}.
+#' @param ..stacktraceon Advanced use only. For stack manipulation purposes; see
+#'   \code{\link{stacktrace}}.
 #' @return a function, wrapped in a S3 class "reactive"
 #'
 #' @examples
@@ -430,17 +488,63 @@ Observable <- setRefClass(
 #'
 #' @export
 reactive <- function(x, env = parent.frame(), quoted = FALSE, label = NULL,
-                     domain = getDefaultReactiveDomain()) {
+                     domain = getDefaultReactiveDomain(),
+                     ..stacktraceon = TRUE) {
   fun <- exprToFunction(x, env, quoted)
   # Attach a label and a reference to the original user source for debugging
-  if (is.null(label))
-    label <- sprintf('reactive(%s)', paste(deparse(body(fun)), collapse='\n'))
-  srcref <- attr(substitute(x), "srcref")
+  srcref <- attr(substitute(x), "srcref", exact = TRUE)
+  if (is.null(label)) {
+    label <- srcrefToLabel(srcref[[1]],
+      sprintf('reactive(%s)', paste(deparse(body(fun)), collapse='\n')))
+  }
   if (length(srcref) >= 2) attr(label, "srcref") <- srcref[[2]]
   attr(label, "srcfile") <- srcFileOfRef(srcref[[1]])
-  o <- Observable$new(fun, label, domain)
+  o <- Observable$new(fun, label, domain, ..stacktraceon = ..stacktraceon)
   registerDebugHook(".func", o, "Reactive")
-  structure(o$getValue@.Data, observable = o, class = "reactive")
+  structure(o$getValue, observable = o, class = "reactive")
+}
+
+# Given the srcref to a reactive expression, attempts to figure out what the
+# name of the reactive expression is. This isn't foolproof, as it literally
+# scans the line of code that started the reactive block and looks for something
+# that looks like assignment. If we fail, fall back to a default value (likely
+# the block of code in the body of the reactive).
+srcrefToLabel <- function(srcref, defaultLabel) {
+  if (is.null(srcref))
+    return(defaultLabel)
+
+  srcfile <- attr(srcref, "srcfile", exact = TRUE)
+  if (is.null(srcfile))
+    return(defaultLabel)
+
+  if (is.null(srcfile$lines))
+    return(defaultLabel)
+
+  lines <- srcfile$lines
+  # When pasting at the Console, srcfile$lines is not split
+  if (length(lines) == 1) {
+    lines <- strsplit(lines, "\n")[[1]]
+  }
+
+  if (length(lines) < srcref[1]) {
+    return(defaultLabel)
+  }
+
+  firstLine <- substring(lines[srcref[1]], 1, srcref[2] - 1)
+
+  m <- regexec("(.*)(<-|=)\\s*reactive\\s*\\($", firstLine)
+  if (m[[1]][1] == -1) {
+    return(defaultLabel)
+  }
+  sym <- regmatches(firstLine, m)[[1]][2]
+  res <- try(parse(text = sym), silent = TRUE)
+  if (inherits(res, "try-error"))
+    return(defaultLabel)
+
+  if (length(res) != 1)
+    return(defaultLabel)
+
+  return(as.character(res))
 }
 
 #' @export
@@ -455,8 +559,8 @@ is.reactive <- function(x) inherits(x, "reactive")
 
 # Return the number of times that a reactive expression or observer has been run
 execCount <- function(x) {
-  if (is.function(x))
-    return(environment(x)$.execCount)
+  if (is.reactive(x))
+    return(attr(x, "observable")$.execCount)
   else if (inherits(x, 'Observer'))
     return(x$.execCount)
   else
@@ -465,30 +569,41 @@ execCount <- function(x) {
 
 # Observer ------------------------------------------------------------------
 
-Observer <- setRefClass(
+Observer <- R6Class(
   'Observer',
-  fields = list(
+  portable = FALSE,
+  public = list(
     .func = 'function',
-    .label = 'character',
+    .label = character(0),
     .domain = 'ANY',
-    .priority = 'numeric',
-    .autoDestroy = 'logical',
-    .invalidateCallbacks = 'list',
-    .execCount = 'integer',
+    .priority = numeric(0),
+    .autoDestroy = logical(0),
+    .invalidateCallbacks = list(),
+    .execCount = integer(0),
     .onResume = 'function',
-    .suspended = 'logical',
-    .destroyed = 'logical',
-    .prevId = 'character'
-  ),
-  methods = list(
-    initialize = function(func, label, suspended = FALSE, priority = 0,
+    .suspended = logical(0),
+    .destroyed = logical(0),
+    .prevId = character(0),
+
+    initialize = function(observerFunc, label, suspended = FALSE, priority = 0,
                           domain = getDefaultReactiveDomain(),
-                          autoDestroy = TRUE) {
-      if (length(formals(func)) > 0)
+                          autoDestroy = TRUE, ..stacktraceon = TRUE) {
+      if (length(formals(observerFunc)) > 0)
         stop("Can't make an observer from a function that takes parameters; ",
              "only functions without parameters can be reactive.")
 
-      .func <<- func
+      .func <<- function() {
+        tryCatch(
+          if (..stacktraceon)
+            ..stacktraceon..(observerFunc())
+          else
+            observerFunc(),
+          validation = function(e) {
+            # It's OK for a validation error to cause an observer to stop
+            # running
+          }
+        )
+      }
       .label <<- label
       .domain <<- domain
       .autoDestroy <<- autoDestroy
@@ -499,7 +614,7 @@ Observer <- setRefClass(
       .destroyed <<- FALSE
       .prevId <<- ''
 
-      onReactiveDomainEnded(.domain, .self$.onDomainEnded)
+      onReactiveDomainEnded(.domain, self$.onDomainEnded)
 
       # Defer the first running of this until flushReact is called
       .createContext()$invalidate()
@@ -509,8 +624,8 @@ Observer <- setRefClass(
       .prevId <<- ctx$id
 
       ctx$onInvalidate(function() {
-        lapply(.invalidateCallbacks, function(func) {
-          func()
+        lapply(.invalidateCallbacks, function(invalidateCallback) {
+          invalidateCallback()
           NULL
         })
 
@@ -525,8 +640,16 @@ Observer <- setRefClass(
       })
 
       ctx$onFlush(function() {
-        if (!.destroyed)
-          run()
+        tryCatch({
+          if (!.destroyed)
+            shinyCallingHandlers(run())
+
+        }, error = function(e) {
+          printError(e)
+          if (!is.null(.domain)) {
+            .domain$unhandledError(e)
+          }
+        })
       })
 
       return(ctx)
@@ -623,7 +746,7 @@ Observer <- setRefClass(
 #'   non-reactive expression.
 #' @param quoted Is the expression quoted? By default, this is \code{FALSE}.
 #'   This is useful when you want to use an expression that is stored in a
-#'   variable; to do so, it must be quoted with `quote()`.
+#'   variable; to do so, it must be quoted with \code{quote()}.
 #' @param label A label for the observer, useful for debugging.
 #' @param suspended If \code{TRUE}, start the observer in a suspended state.
 #'   If \code{FALSE} (the default), start in a non-suspended state.
@@ -634,6 +757,8 @@ Observer <- setRefClass(
 #' @param domain See \link{domains}.
 #' @param autoDestroy If \code{TRUE} (the default), the observer will be
 #'   automatically destroyed when its domain (if any) ends.
+#' @param ..stacktraceon Advanced use only. For stack manipulation purposes; see
+#'   \code{\link{stacktrace}}.
 #' @return An observer reference class object. This object has the following
 #'   methods:
 #'   \describe{
@@ -691,14 +816,16 @@ Observer <- setRefClass(
 #' @export
 observe <- function(x, env=parent.frame(), quoted=FALSE, label=NULL,
                     suspended=FALSE, priority=0,
-                    domain=getDefaultReactiveDomain(), autoDestroy = TRUE) {
+                    domain=getDefaultReactiveDomain(), autoDestroy = TRUE,
+                    ..stacktraceon = TRUE) {
 
   fun <- exprToFunction(x, env, quoted)
   if (is.null(label))
     label <- sprintf('observe(%s)', paste(deparse(body(fun)), collapse='\n'))
 
   o <- Observer$new(fun, label=label, suspended=suspended, priority=priority,
-                    domain=domain, autoDestroy=autoDestroy)
+                    domain=domain, autoDestroy=autoDestroy,
+                    ..stacktraceon=..stacktraceon)
   registerDebugHook(".func", o, "Observer")
   invisible(o)
 }
@@ -806,7 +933,7 @@ setAutoflush <- local({
 #'
 #'   # Anything that calls autoInvalidate will automatically invalidate
 #'   # every 2 seconds.
-#'   autoInvalidate <- reactiveTimer(2000, session)
+#'   autoInvalidate <- reactiveTimer(2000)
 #'
 #'   observe({
 #'     # Invalidate and re-execute this reactive expression every time the
@@ -829,12 +956,7 @@ setAutoflush <- local({
 #' }
 #'
 #' @export
-reactiveTimer <- function(intervalMs=1000, session) {
-  if (missing(session)) {
-    warning("reactiveTimer should be passed a session object or NULL")
-    session <- NULL
-  }
-
+reactiveTimer <- function(intervalMs=1000, session = getDefaultReactiveDomain()) {
   dependents <- Map$new()
   timerCallbacks$schedule(intervalMs, function() {
     # Quit if the session is closed
@@ -901,19 +1023,14 @@ reactiveTimer <- function(intervalMs=1000, session) {
 #'   # input$n changes.
 #'   output$plot <- renderPlot({
 #'     # Re-execute this reactive expression after 2000 milliseconds
-#'     invalidateLater(2000, session)
+#'     invalidateLater(2000)
 #'     hist(isolate(input$n))
 #'   })
 #' })
 #' }
 #'
 #' @export
-invalidateLater <- function(millis, session) {
-  if (missing(session)) {
-    warning("invalidateLater should be passed a session object or NULL")
-    session <- NULL
-  }
-
+invalidateLater <- function(millis, session = getDefaultReactiveDomain()) {
   ctx <- .getReactiveEnvironment()$currentContext()
   timerCallbacks$schedule(millis, function() {
     # Quit if the session is closed
@@ -1161,9 +1278,10 @@ reactiveFileReader <- function(intervalMillis, session, filePath, readFunc, ...)
 isolate <- function(expr) {
   ctx <- Context$new(getDefaultReactiveDomain(), '[isolate]', type='isolate')
   on.exit(ctx$invalidate())
-  ctx$run(function() {
-    expr
-  })
+  # Matching ..stacktraceon../..stacktraceoff.. pair
+  ..stacktraceoff..(ctx$run(function() {
+    ..stacktraceon..(expr)
+  }))
 }
 
 #' Evaluate an expression without a reactive context
@@ -1183,4 +1301,183 @@ maskReactiveContext <- function(expr) {
   .getReactiveEnvironment()$runWith(NULL, function() {
     expr
   })
+}
+
+#' Event handler
+#'
+#' Respond to "event-like" reactive inputs, values, and expressions.
+#'
+#' Shiny's reactive programming framework is primarily designed for calculated
+#' values (reactive expressions) and side-effect-causing actions (observers)
+#' that respond to \emph{any} of their inputs changing. That's often what is
+#' desired in Shiny apps, but not always: sometimes you want to wait for a
+#' specific action to be taken from the user, like clicking an
+#' \code{\link{actionButton}}, before calculating an expression or taking an
+#' action. A reactive value or expression that is used to trigger other
+#' calculations in this way is called an \emph{event}.
+#'
+#' These situations demand a more imperative, "event handling" style of
+#' programming that is possible--but not particularly intuitive--using the
+#' reactive programming primitives \code{\link{observe}} and
+#' \code{\link{isolate}}. \code{observeEvent} and \code{eventReactive} provide
+#' straightforward APIs for event handling that wrap \code{observe} and
+#' \code{isolate}.
+#'
+#' Use \code{observeEvent} whenever you want to \emph{perform an action} in
+#' response to an event. (Note that "recalculate a value" does not generally
+#' count as performing an action--see \code{eventReactive} for that.) The first
+#' argument is the event you want to respond to, and the second argument is a
+#' function that should be called whenever the event occurs.
+#'
+#' Use \code{eventReactive} to create a \emph{calculated value} that only
+#' updates in response to an event. This is just like a normal
+#' \link[=reactive]{reactive expression} except it ignores all the usual
+#' invalidations that come from its reactive dependencies; it only invalidates
+#' in response to the given event.
+#'
+#' Both \code{observeEvent} and \code{eventReactive} take an \code{ignoreNULL}
+#' parameter that affects behavior when the \code{eventExpr} evaluates to
+#' \code{NULL} (or in the special case of an \code{\link{actionButton}},
+#' \code{0}). In these cases, if \code{ignoreNULL} is \code{TRUE}, then an
+#' \code{observeEvent} will not execute and an \code{eventReactive} will raise a
+#' silent \link[=validate]{validation} error. This is useful behavior if you
+#' don't want to do the action or calculation when your app first starts, but
+#' wait for the user to initiate the action first (like a "Submit" button);
+#' whereas \code{ignoreNULL=FALSE} is desirable if you want to initially perform
+#' the action/calculation and just let the user re-initiate it (like a
+#' "Recalculate" button).
+#'
+#' @param eventExpr A (quoted or unquoted) expression that represents the event;
+#'   this can be a simple reactive value like \code{input$click}, a call to a
+#'   reactive expression like \code{dataset()}, or even a complex expression
+#'   inside curly braces
+#' @param handlerExpr The expression to call whenever \code{eventExpr} is
+#'   invalidated. This should be a side-effect-producing action (the return
+#'   value will be ignored). It will be executed within an \code{\link{isolate}}
+#'   scope.
+#' @param valueExpr The expression that produces the return value of the
+#'   \code{eventReactive}. It will be executed within an \code{\link{isolate}}
+#'   scope.
+#' @param event.env The parent environment for \code{eventExpr}. By default,
+#'   this is the calling environment.
+#' @param event.quoted Is the \code{eventExpr} expression quoted? By default,
+#'   this is \code{FALSE}. This is useful when you want to use an expression
+#'   that is stored in a variable; to do so, it must be quoted with
+#'   \code{quote()}.
+#' @param handler.env The parent environment for \code{handlerExpr}. By default,
+#'   this is the calling environment.
+#' @param handler.quoted Is the \code{handlerExpr} expression quoted? By
+#'   default, this is \code{FALSE}. This is useful when you want to use an
+#'   expression that is stored in a variable; to do so, it must be quoted with
+#'   \code{quote()}.
+#' @param value.env The parent environment for \code{valueExpr}. By default,
+#'   this is the calling environment.
+#' @param value.quoted Is the \code{valueExpr} expression quoted? By default,
+#'   this is \code{FALSE}. This is useful when you want to use an expression
+#'   that is stored in a variable; to do so, it must be quoted with \code{quote()}.
+#' @param label A label for the observer or reactive, useful for debugging.
+#' @param suspended If \code{TRUE}, start the observer in a suspended state. If
+#'   \code{FALSE} (the default), start in a non-suspended state.
+#' @param priority An integer or numeric that controls the priority with which
+#'   this observer should be executed. An observer with a given priority level
+#'   will always execute sooner than all observers with a lower priority level.
+#'   Positive, negative, and zero values are allowed.
+#' @param domain See \link{domains}.
+#' @param autoDestroy If \code{TRUE} (the default), the observer will be
+#'   automatically destroyed when its domain (if any) ends.
+#' @param ignoreNULL Whether the action should be triggered (or value
+#'   calculated, in the case of \code{eventReactive}) when the input is
+#'   \code{NULL}. See Details.
+#' @return \code{observeEvent} returns an observer reference class object (see
+#'   \code{\link{observe}}). \code{eventReactive} returns a reactive expression
+#'   object (see \code{\link{reactive}}).
+#'
+#' @seealso \code{\link{actionButton}}
+#'
+#' @examples
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   ui <- fluidPage(
+#'     column(4,
+#'       numericInput("x", "Value", 5),
+#'       br(),
+#'       actionButton("button", "Show")
+#'     ),
+#'     column(8, tableOutput("table"))
+#'   )
+#'   server <- function(input, output) {
+#'     # Take an action every time button is pressed;
+#'     # here, we just print a message to the console
+#'     observeEvent(input$button, {
+#'       cat("Showing", input$x, "rows\n")
+#'     })
+#'     # Take a reactive dependency on input$button, but
+#'     # not on any of the stuff inside the function
+#'     df <- eventReactive(input$button, {
+#'       head(cars, input$x)
+#'     })
+#'     output$table <- renderTable({
+#'       df()
+#'     })
+#'   }
+#'   shinyApp(ui=ui, server=server)
+#' }
+#'
+#' @export
+observeEvent <- function(eventExpr, handlerExpr,
+  event.env = parent.frame(), event.quoted = FALSE,
+  handler.env = parent.frame(), handler.quoted = FALSE,
+  label=NULL, suspended=FALSE, priority=0, domain=getDefaultReactiveDomain(),
+  autoDestroy = TRUE, ignoreNULL = TRUE) {
+
+  eventFunc <- exprToFunction(eventExpr, event.env, event.quoted)
+  if (is.null(label))
+    label <- sprintf('observeEvent(%s)', paste(deparse(body(eventFunc)), collapse='\n'))
+  eventFunc <- wrapFunctionLabel(eventFunc, "observeEventExpr", ..stacktraceon = TRUE)
+
+  handlerFunc <- exprToFunction(handlerExpr, handler.env, handler.quoted)
+  handlerFunc <- wrapFunctionLabel(handlerFunc, "observeEventHandler", ..stacktraceon = TRUE)
+
+  invisible(observe({
+    e <- eventFunc()
+
+    if (ignoreNULL && isNullEvent(e)) {
+      return()
+    }
+
+    isolate(handlerFunc())
+  }, label = label, suspended = suspended, priority = priority, domain = domain,
+    autoDestroy = TRUE, ..stacktraceon = FALSE))
+}
+
+#' @rdname observeEvent
+#' @export
+eventReactive <- function(eventExpr, valueExpr,
+  event.env = parent.frame(), event.quoted = FALSE,
+  value.env = parent.frame(), value.quoted = FALSE,
+  label=NULL, domain=getDefaultReactiveDomain(),
+  ignoreNULL = TRUE) {
+
+  eventFunc <- exprToFunction(eventExpr, event.env, event.quoted)
+  if (is.null(label))
+    label <- sprintf('eventReactive(%s)', paste(deparse(body(eventFunc)), collapse='\n'))
+  eventFunc <- wrapFunctionLabel(eventFunc, "eventReactiveExpr", ..stacktraceon = TRUE)
+
+  handlerFunc <- exprToFunction(valueExpr, value.env, value.quoted)
+  handlerFunc <- wrapFunctionLabel(handlerFunc, "eventReactiveHandler", ..stacktraceon = TRUE)
+
+  invisible(reactive({
+    e <- eventFunc()
+
+    validate(need(
+      !ignoreNULL || !isNullEvent(e),
+      message = FALSE
+    ))
+
+    isolate(handlerFunc())
+  }, label = label, domain = domain, ..stacktraceon = FALSE))
+}
+
+isNullEvent <- function(value) {
+  is.null(value) || (inherits(value, 'shinyActionButtonValue') && value == 0)
 }

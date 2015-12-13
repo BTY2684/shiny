@@ -25,7 +25,7 @@ NULL
 #' rnormB(5)  # [1] -0.7946034  0.2568374 -0.6567597  1.2451387 -0.8375699
 #'
 #' @export
-repeatable <- function(rngfunc, seed = runif(1, 0, .Machine$integer.max)) {
+repeatable <- function(rngfunc, seed = stats::runif(1, 0, .Machine$integer.max)) {
   force(seed)
 
   function(...) {
@@ -95,7 +95,7 @@ reinitializeSeed <- if (getRversion() >= '3.0.0') {
 
 # Version of runif that runs with private seed
 p_runif <- function(...) {
-  withPrivateSeed(runif(...))
+  withPrivateSeed(stats::runif(...))
 }
 
 # Version of sample that runs with private seed
@@ -118,6 +118,10 @@ randomInt <- function(min, max) {
 
 p_randomInt <- function(...) {
   withPrivateSeed(randomInt(...))
+}
+
+isWholeNum <- function(x, tol = .Machine$double.eps^0.5) {
+  abs(x - round(x)) < tol
 }
 
 `%OR%` <- function(x, y) {
@@ -151,20 +155,60 @@ dropNullsOrEmpty <- function(x) {
   x[!vapply(x, nullOrEmpty, FUN.VALUE=logical(1))]
 }
 
+# Given a vector/list, return TRUE if any elements are unnamed, FALSE otherwise.
+anyUnnamed <- function(x) {
+  # Zero-length vector
+  if (length(x) == 0) return(FALSE)
+
+  nms <- names(x)
+
+  # List with no name attribute
+  if (is.null(nms)) return(TRUE)
+
+  # List with name attribute; check for any ""
+  any(!nzchar(nms))
+}
+
 # Combine dir and (file)name into a file path. If a file already exists with a
 # name differing only by case, then use it instead.
-file.path.ci <- function(dir, name) {
-  default <- file.path(dir, name)
+file.path.ci <- function(...) {
+  result <- find.file.ci(...)
+  if (!is.null(result))
+    return(result)
+
+  # If not found, return the file path that was given to us.
+  return(file.path(...))
+}
+
+# Does a particular file exist? Case-insensitive for filename, case-sensitive
+# for path (on platforms with case-sensitive file system).
+file.exists.ci <- function(...) {
+  !is.null(find.file.ci(...))
+}
+
+# Look for a file, case-insensitive for filename, case-sensitive for path (on
+# platforms with case-sensitive filesystem). If found, return the path to the
+# file, with the correct case. If not found, return NULL.
+find.file.ci <- function(...) {
+  default <- file.path(...)
+  if (length(default) > 1)
+    stop("find.file.ci can only check for one file at a time.")
   if (file.exists(default))
     return(default)
-  if (!file.exists(dir))
-    return(default)
 
-  matches <- list.files(dir, name, ignore.case=TRUE, full.names=TRUE,
-    include.dirs=TRUE)
+  dir <- dirname(default)
+  name <- basename(default)
+
+  # If we got here, then we'll check for a directory with the exact case, and a
+  # name with any case.
+  all_files <- list.files(dir, all.files=TRUE, full.names=TRUE,
+                          include.dirs=TRUE)
+  match_idx <- tolower(name) == tolower(basename(all_files))
+  matches <- all_files[match_idx]
   if (length(matches) == 0)
-    return(default)
-  return(matches[[1]])
+    return(NULL)
+
+  return(matches[1])
 }
 
 # Attempt to join a path and relative path, and turn the result into a
@@ -185,7 +229,7 @@ resolve <- function(dir, relpath) {
   abs.path <- normalizePath(abs.path, winslash='/', mustWork=TRUE)
   dir <- normalizePath(dir, winslash='/', mustWork=TRUE)
   # trim the possible trailing slash under Windows (#306)
-  if (.Platform$OS.type == 'windows') dir <- sub('/$', '', dir)
+  if (isWindows()) dir <- sub('/$', '', dir)
   if (nchar(abs.path) <= nchar(dir) + 1)
     return(NULL)
   if (substr(abs.path, 1, nchar(dir)) != dir ||
@@ -195,6 +239,8 @@ resolve <- function(dir, relpath) {
   return(abs.path)
 }
 
+isWindows <- function() .Platform$OS.type == 'windows'
+
 # This is a wrapper for download.file and has the same interface.
 # The only difference is that, if the protocol is https, it changes the
 # download settings, depending on platform.
@@ -202,23 +248,49 @@ download <- function(url, ...) {
   # First, check protocol. If http or https, check platform:
   if (grepl('^https?://', url)) {
 
-    # If Windows, call setInternet2, then use download.file with defaults.
-    if (.Platform$OS.type == "windows") {
-      # If we directly use setInternet2, R CMD CHECK gives a Note on Mac/Linux
-      mySI2 <- `::`(utils, 'setInternet2')
-      # Store initial settings
-      internet2_start <- mySI2(NA)
-      on.exit(mySI2(internet2_start))
+    # Check whether we are running R 3.2
+    isR32 <- getRversion() >= "3.2"
 
-      # Needed for https
-      mySI2(TRUE)
-      download.file(url, ...)
+    # Windows
+    if (.Platform$OS.type == "windows") {
+
+      if (isR32) {
+        method <- "wininet"
+      } else {
+
+        # If we directly use setInternet2, R CMD CHECK gives a Note on Mac/Linux
+        seti2 <- `::`(utils, 'setInternet2')
+
+        # Check whether we are already using internet2 for internal
+        internet2_start <- seti2(NA)
+
+        # If not then temporarily set it
+        if (!internet2_start) {
+          # Store initial settings, and restore on exit
+          on.exit(suppressWarnings(seti2(internet2_start)))
+
+          # Needed for https. Will get warning if setInternet2(FALSE) already run
+          # and internet routines are used. But the warnings don't seem to matter.
+          suppressWarnings(seti2(TRUE))
+        }
+
+        method <- "internal"
+      }
+
+      # download.file will complain about file size with something like:
+      #       Warning message:
+      #         In download.file(url, ...) : downloaded length 19457 != reported length 200
+      # because apparently it compares the length with the status code returned (?)
+      # so we supress that
+      suppressWarnings(download.file(url, method = method, ...))
 
     } else {
-      # If non-Windows, check for curl/wget/lynx, then call download.file with
+      # If non-Windows, check for libcurl/curl/wget/lynx, then call download.file with
       # appropriate method.
 
-      if (nzchar(Sys.which("wget")[1])) {
+      if (isR32 && capabilities("libcurl")) {
+        method <- "libcurl"
+      } else if (nzchar(Sys.which("wget")[1])) {
         method <- "wget"
       } else if (nzchar(Sys.which("curl")[1])) {
         method <- "curl"
@@ -236,60 +308,17 @@ download <- function(url, ...) {
         stop("no download method found")
       }
 
-      download.file(url, method = method, ...)
+      utils::download.file(url, method = method, ...)
     }
 
   } else {
-    download.file(url, ...)
+    utils::download.file(url, ...)
   }
 }
 
-knownContentTypes <- Map$new()
-knownContentTypes$mset(
-  html='text/html; charset=UTF-8',
-  htm='text/html; charset=UTF-8',
-  js='text/javascript',
-  css='text/css',
-  png='image/png',
-  jpg='image/jpeg',
-  jpeg='image/jpeg',
-  gif='image/gif',
-  svg='image/svg+xml',
-  txt='text/plain',
-  pdf='application/pdf',
-  ps='application/postscript',
-  xml='application/xml',
-  m3u='audio/x-mpegurl',
-  m4a='audio/mp4a-latm',
-  m4b='audio/mp4a-latm',
-  m4p='audio/mp4a-latm',
-  mp3='audio/mpeg',
-  wav='audio/x-wav',
-  m4u='video/vnd.mpegurl',
-  m4v='video/x-m4v',
-  mp4='video/mp4',
-  mpeg='video/mpeg',
-  mpg='video/mpeg',
-  avi='video/x-msvideo',
-  mov='video/quicktime',
-  ogg='application/ogg',
-  swf='application/x-shockwave-flash',
-  doc='application/msword',
-  xls='application/vnd.ms-excel',
-  ppt='application/vnd.ms-powerpoint',
-  xlsx='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  xltx='application/vnd.openxmlformats-officedocument.spreadsheetml.template',
-  potx='application/vnd.openxmlformats-officedocument.presentationml.template',
-  ppsx='application/vnd.openxmlformats-officedocument.presentationml.slideshow',
-  pptx='application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  sldx='application/vnd.openxmlformats-officedocument.presentationml.slide',
-  docx='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  dotx='application/vnd.openxmlformats-officedocument.wordprocessingml.template',
-  xlam='application/vnd.ms-excel.addin.macroEnabled.12',
-  xlsb='application/vnd.ms-excel.sheet.binary.macroEnabled.12')
-
-getContentType <- function(ext, defaultType='application/octet-stream') {
-  knownContentTypes$get(tolower(ext)) %OR% defaultType
+getContentType <- function(file, defaultType = 'application/octet-stream') {
+  subtype <- ifelse(grepl('[.]html?$', file), 'charset=UTF-8', '')
+  mime::guess_type(file, unknown = defaultType, subtype = subtype)
 }
 
 # Create a zero-arg function from a quoted expression and environment
@@ -401,32 +430,45 @@ exprToFunction <- function(expr, env=parent.frame(2), quoted=FALSE,
 #' @param assign.env The environment in which the function should be assigned.
 #' @param label A label for the object to be shown in the debugger. Defaults to
 #'   the name of the calling function.
+#' @param wrappedWithLabel,..stacktraceon Advanced use only. For stack manipulation purposes; see
+#'   \code{\link{stacktrace}}.
 #'
 #' @export
 installExprFunction <- function(expr, name, eval.env = parent.frame(2),
                                 quoted = FALSE,
                                 assign.env = parent.frame(1),
-                                label = as.character(sys.call(-1)[[1]])) {
+                                label = as.character(sys.call(-1)[[1]]),
+                                wrappedWithLabel = TRUE,
+                                ..stacktraceon = FALSE) {
   func <- exprToFunction(expr, eval.env, quoted, 2)
+  if (wrappedWithLabel) {
+    func <- wrapFunctionLabel(func, label, ..stacktraceon = ..stacktraceon)
+  }
   assign(name, func, envir = assign.env)
   registerDebugHook(name, assign.env, label)
 }
 
 #' Parse a GET query string from a URL
 #'
-#' Returns a named character vector of key-value pairs.
+#' Returns a named list of key-value pairs.
 #'
 #' @param str The query string. It can have a leading \code{"?"} or not.
+#' @param nested Whether to parse the query string of as a nested list when it
+#'   contains pairs of square brackets \code{[]}. For example, the query
+#'   \samp{a[i1][j1]=x&b[i1][j1]=y&b[i2][j1]=z} will be parsed as \code{list(a =
+#'   list(i1 = list(j1 = 'x')), b = list(i1 = list(j1 = 'y'), i2 = list(j1 =
+#'   'z')))} when \code{nested = TRUE}, and \code{list(`a[i1][j1]` = 'x',
+#'   `b[i1][j1]` = 'y', `b[i2][j1]` = 'z')} when \code{nested = FALSE}.
 #' @export
 #' @examples
 #' parseQueryString("?foo=1&bar=b%20a%20r")
 #'
 #' \dontrun{
 #' # Example of usage within a Shiny app
-#' shinyServer(function(input, output, clientData) {
+#' shinyServer(function(input, output, session) {
 #'
 #'   output$queryText <- renderText({
-#'     query <- parseQueryString(clientData$url_search)
+#'     query <- parseQueryString(session$clientData$url_search)
 #'
 #'     # Ways of accessing the values
 #'     if (as.numeric(query$foo) == 1) {
@@ -442,7 +484,7 @@ installExprFunction <- function(expr, name, eval.env = parent.frame(2),
 #' })
 #' }
 #'
-parseQueryString <- function(str) {
+parseQueryString <- function(str, nested = FALSE) {
   if (is.null(str) || nchar(str) == 0)
     return(list())
 
@@ -462,16 +504,36 @@ parseQueryString <- function(str) {
   keys   <- gsub('+', ' ', keys,   fixed = TRUE)
   values <- gsub('+', ' ', values, fixed = TRUE)
 
-  keys   <- vapply(keys,   function(x) URLdecode(x), FUN.VALUE = character(1))
-  values <- vapply(values, function(x) URLdecode(x), FUN.VALUE = character(1))
+  keys   <- URLdecode(keys)
+  values <- URLdecode(values)
 
-  setNames(as.list(values), keys)
+  res <- stats::setNames(as.list(values), keys)
+  if (!nested) return(res)
+
+  # Make a nested list from a query of the form ?a[1][1]=x11&a[1][2]=x12&...
+  for (i in grep('\\[.+\\]', keys)) {
+    k <- strsplit(keys[i], '[][]')[[1L]]  # split by [ or ]
+    res <- assignNestedList(res, k[k != ''], values[i])
+    res[[keys[i]]] <- NULL    # remove res[['a[1][1]']]
+  }
+  res
+}
+
+# Assign value to the bottom element of the list x using recursive indices idx
+assignNestedList <- function(x = list(), idx, value) {
+  for (i in seq_along(idx)) {
+    sub <- idx[seq_len(i)]
+    if (is.null(x[[sub]])) x[[sub]] <- list()
+  }
+  x[[idx]] <- value
+  x
 }
 
 # decide what to do in case of errors; it is customizable using the shiny.error
 # option (e.g. we can set options(shiny.error = recover))
+#' @include conditions.R
 shinyCallingHandlers <- function(expr) {
-  withCallingHandlers(expr, error = function(e) {
+  withCallingHandlers(captureStackTraces(expr), error = function(e) {
     handle <- getOption('shiny.error')
     if (is.function(handle)) handle()
   })
@@ -484,18 +546,27 @@ shinyCallingHandlers <- function(expr) {
 #' @param new Name of replacement function.
 #' @param msg Message to print. If used, this will override the default message.
 #' @param old Name of deprecated function.
+#' @param version The last version of Shiny before the item was deprecated.
+#' @keywords internal
 shinyDeprecated <- function(new=NULL, msg=NULL,
-                            old=as.character(sys.call(sys.parent()))[1L]) {
+                            old=as.character(sys.call(sys.parent()))[1L],
+                            version = NULL) {
 
-  if (getOption("shiny.deprecation.messages", default=TRUE) == FALSE)
+  if (getOption("shiny.deprecation.messages") %OR% TRUE == FALSE)
     return(invisible())
 
   if (is.null(msg)) {
     msg <- paste(old, "is deprecated.")
-    if (!is.null(new))
+    if (!is.null(new)) {
       msg <- paste(msg, "Please use", new, "instead.",
         "To disable this message, run options(shiny.deprecation.messages=FALSE)")
+    }
   }
+
+  if (!is.null(version)) {
+    msg <- paste0(msg, " (Last used in version ", version, ")")
+  }
+
   # Similar to .Deprecated(), but print a message instead of warning
   message(msg)
 }
@@ -522,15 +593,17 @@ registerDebugHook <- function(name, where, label) {
   }
 }
 
-Callbacks <- setRefClass(
+Callbacks <- R6Class(
   'Callbacks',
-  fields = list(
-    .nextId = 'integer',
-    .callbacks = 'Map'
-  ),
-  methods = list(
+  portable = FALSE,
+  class = FALSE,
+  public = list(
+    .nextId = integer(0),
+    .callbacks = 'Map',
+
     initialize = function() {
       .nextId <<- as.integer(.Machine$integer.max)
+      .callbacks <<- Map$new()
     },
     register = function(callback) {
       id <- as.character(.nextId)
@@ -540,12 +613,28 @@ Callbacks <- setRefClass(
         .callbacks$remove(id)
       })
     },
-    invoke = function(..., onError=NULL) {
-      for (callback in .callbacks$values()) {
+    invoke = function(..., onError=NULL, ..stacktraceon = FALSE) {
+      # Ensure that calls are invoked in the order that they were registered
+      keys <- as.character(sort(as.integer(.callbacks$keys()), decreasing = TRUE))
+      callbacks <- .callbacks$mget(keys)
+
+      for (callback in callbacks) {
         if (is.null(onError)) {
-          callback(...)
+          if (..stacktraceon) {
+            ..stacktraceon..(callback(...))
+          } else {
+            callback(...)
+          }
         } else {
-          tryCatch(callback(...), error = onError)
+          tryCatch(
+            captureStackTraces(
+              if (..stacktraceon)
+                ..stacktraceon..(callback(...))
+              else
+                callback(...)
+            ),
+            error = onError
+          )
         }
       }
     },
@@ -557,80 +646,95 @@ Callbacks <- setRefClass(
 
 # convert a data frame to JSON as required by DataTables request
 dataTablesJSON <- function(data, req) {
-  query <- req$QUERY_STRING
   n <- nrow(data)
-  with(parseQueryString(query), {
-    useRegex <- function(j, envir = parent.frame()) {
-      # FIXME: bRegex is not part of the query string yet (DataTables 1.9.4)
-      return(TRUE)
-      ex <- getExists(
-        if (missing(j)) 'bRegex' else sprintf('bRegex_%s', j), 'character', envir
-      )
-      is.null(ex) || ex == 'true'
-    }
-    # global searching
-    i <- seq_len(n)
-    sSearch <- getExists('sSearch', 'character')
-    if (length(sSearch) && nzchar(sSearch)) {
-      bRegex <- useRegex()
-      i0 <- apply(data, 2, function(x) grep(sSearch, as.character(x), fixed = !bRegex))
-      i <- intersect(i, unique(unlist(i0)))
-    }
-    # search by columns
-    if (length(i)) for (j in seq_len(as.integer(iColumns)) - 1) {
-      if (is.null(s <- getExists(sprintf('bSearchable_%d', j), 'character')) ||
-            s == "0" || s == "false") next  # the j-th column is not searchable
-      if (is.null(k <- getExists(sprintf('sSearch_%d', j), 'character'))) next
-      if (nzchar(k)) {
-        dj <- data[, j + 1]
-        r  <- commaToRange(k)
-        ij <- if (length(r) == 2 && is.numeric(dj)) {
-          which(dj >= r[1] & dj <= r[2])
-        } else {
-          grep(k, as.character(dj), fixed = !useRegex(j))
-        }
-        i <- intersect(ij, i)
-      }
-      if (length(i) == 0) break
-    }
-    if (length(i) != n) data <- data[i, , drop = FALSE]
-    # sorting
-    oList <- list()
-    for (j in seq_len(as.integer(iSortingCols)) - 1) {
-      if (is.null(k <- getExists(sprintf('iSortCol_%d', j), 'character'))) break
-      desc <- getExists(sprintf('sSortDir_%d', j), 'character')
-      if (is.character(desc)) {
-        col <- data[, as.integer(k) + 1]
-        oList[[length(oList) + 1]] <- (if (desc == 'asc') identity else `-`)(
-          if (is.numeric(col)) col else xtfrm(col)
-        )
-      }
-    }
-    if (length(oList)) {
-      i <- do.call(order, oList)
-      data <- data[i, , drop = FALSE]
-    }
-    # paging
-    if (iDisplayLength != '-1') {
-      i <- seq(as.integer(iDisplayStart) + 1L, length.out = as.integer(iDisplayLength))
-      i <- i[i <= nrow(data)]
-      fdata <- data[i, , drop = FALSE]  # filtered data
-    } else fdata <- data
-    fdata <- unname(as.matrix(fdata))
-    # WAT: toJSON(list(x = matrix(nrow = 0, ncol = 1))) => {"x": } (#299)
-    if (nrow(fdata) == 0) fdata <- list()
-    # WAT: toJSON(list(x = matrix(1:2))) => {x: [ [1], [2] ]}, however,
-    # toJSON(list(x = matrix(1))) => {x: [ 1 ]} (loss of dimension, #429)
-    if (all(dim(fdata) == 1)) fdata <- list(list(fdata[1, 1]))
+  # DataTables requests were sent via POST
+  params <- URLdecode(rawToChar(req$rook.input$read()))
+  q <- parseQueryString(params, nested = TRUE)
+  ci <- q$search[['caseInsensitive']] == 'true'
 
-    res <- toJSON(list(
-      sEcho = as.integer(sEcho),
-      iTotalRecords = n,
-      iTotalDisplayRecords = nrow(data),
-      aaData = fdata
-    ))
-    httpResponse(200, 'application/json', res)
-  })
+  # global searching
+  i <- seq_len(n)
+  if (length(q$search[['value']]) && q$search[['value']] != '') {
+    i0 <- apply(data, 2, function(x) {
+      grep2(q$search[['value']], as.character(x),
+            fixed = q$search[['regex']] == 'false', ignore.case = ci)
+    })
+    i <- intersect(i, unique(unlist(i0)))
+  }
+
+  # search by columns
+  if (length(i)) for (j in names(q$columns)) {
+    col <- q$columns[[j]]
+    # if the j-th column is not searchable or the search string is "", skip it
+    if (col[['searchable']] != 'true') next
+    if ((k <- col[['search']][['value']]) == '') next
+    j <- as.integer(j)
+    dj <- data[, j + 1]
+    r  <- commaToRange(k)
+    ij <- if (length(r) == 2 && is.numeric(dj)) {
+      which(dj >= r[1] & dj <= r[2])
+    } else {
+      grep2(k, as.character(dj), fixed = col[['search']][['regex']] == 'false',
+            ignore.case = ci)
+    }
+    i <- intersect(ij, i)
+    if (length(i) == 0) break
+  }
+  if (length(i) != n) data <- data[i, , drop = FALSE]
+
+  # sorting
+  oList <- list()
+  for (ord in q$order) {
+    k <- ord[['column']]  # which column to sort
+    d <- ord[['dir']]     # direction asc/desc
+    if (q$columns[[k]][['orderable']] != 'true') next
+    col <- data[, as.integer(k) + 1]
+    oList[[length(oList) + 1]] <- (if (d == 'asc') identity else `-`)(
+      if (is.numeric(col)) col else xtfrm(col)
+    )
+  }
+  if (length(oList)) {
+    i <- do.call(order, oList)
+    data <- data[i, , drop = FALSE]
+  }
+  # paging
+  if (q$length != '-1') {
+    i <- seq(as.integer(q$start) + 1L, length.out = as.integer(q$length))
+    i <- i[i <= nrow(data)]
+    fdata <- data[i, , drop = FALSE]  # filtered data
+  } else fdata <- data
+
+  fdata <- unname(as.matrix(fdata))
+  if (is.character(fdata) && q$escape != 'false') {
+    if (q$escape == 'true') fdata <- htmlEscape(fdata) else {
+      k <- as.integer(strsplit(q$escape, ',')[[1]])
+      # use seq_len() in case escape = negative indices, e.g. c(-1, -5)
+      for (j in seq_len(ncol(fdata))[k]) fdata[, j] <- htmlEscape(fdata[, j])
+    }
+  }
+
+  res <- toJSON(list(
+    draw = as.integer(q$draw),
+    recordsTotal = n,
+    recordsFiltered = nrow(data),
+    data = fdata
+  ))
+  httpResponse(200, 'application/json', enc2utf8(res))
+}
+
+# when both ignore.case and fixed are TRUE, we use grep(ignore.case = FALSE,
+# fixed = TRUE) to do lower-case matching of pattern on x
+grep2 <- function(pattern, x, ignore.case = FALSE, fixed = FALSE, ...) {
+  if (fixed && ignore.case) {
+    pattern <- tolower(pattern)
+    x <- tolower(x)
+    ignore.case <- FALSE
+  }
+  # when the user types in the search box, the regular expression may not be
+  # complete before it is sent to the server, in which case we do not search
+  if (!fixed && inherits(try(grep(pattern, ''), silent = TRUE), 'try-error'))
+    return(seq_along(x))
+  grep(pattern, x, ignore.case = ignore.case, fixed = fixed, ...)
 }
 
 getExists <- function(x, mode, envir = parent.frame()) {
@@ -655,6 +759,7 @@ commaToRange <- function(string) {
 checkAsIs <- function(options) {
   evalOptions <- if (length(options)) {
     nms <- names(options)
+    if (length(nms) == 0L || any(nms == '')) stop("'options' must be a named list")
     i <- unlist(lapply(options, function(x) {
       is.character(x) && inherits(x, 'AsIs')
     }))
@@ -815,7 +920,7 @@ columnToRowData <- function(data) {
 #'   output$plot <- renderPlot({
 #'     validate(
 #'       need(input$in1, 'Check at least one letter!'),
-#'       need(input$in2 == '', 'Please choose a state.')
+#'       need(input$in2 != '', 'Please choose a state.')
 #'     )
 #'     plot(1:10, main = paste(c(input$in1, input$in2), collapse = ', '))
 #'   })
@@ -833,7 +938,7 @@ validate <- function(..., errorClass = character(0)) {
       stop("Unexpected validation result: ", as.character(x))
   })
 
-  results <- na.omit(results)
+  results <- stats::na.omit(results)
   if (length(results) == 0)
     return(invisible())
 
@@ -877,11 +982,11 @@ isTruthy <- function(x) {
     return(FALSE)
   if (all(is.na(x)))
     return(FALSE)
-  if (is.character(x) && !any(nzchar(na.omit(x))))
+  if (is.character(x) && !any(nzchar(stats::na.omit(x))))
     return(FALSE)
   if (inherits(x, 'shinyActionButtonValue') && x == 0)
     return(FALSE)
-  if (is.logical(x) && !any(na.omit(x)))
+  if (is.logical(x) && !any(stats::na.omit(x)))
     return(FALSE)
 
   return(TRUE)
@@ -903,6 +1008,9 @@ stopWithCondition <- function(class, message) {
 #' its version, and whether it is the open source edition or professional
 #' edition. If the app is not served through the Shiny Server, this function
 #' just returns \code{list(shinyServer = FALSE)}.
+#'
+#' This function will only return meaningful data when using Shiny Server
+#' version 1.2.2 or later.
 #' @export
 #' @return A list of the Shiny Server information.
 serverInfo <- function() {
@@ -915,4 +1023,123 @@ setServerInfo <- function(...) {
   infoNew <- list(...)
   infoOld[names(infoNew)] <- infoNew
   .globals$serverInfo <- infoOld
+}
+
+# assume file is encoded in UTF-8, but warn against BOM
+checkEncoding <- function(file) {
+  # skip *nix because its locale is normally UTF-8 based (e.g. en_US.UTF-8), and
+  # *nix users have to make a conscious effort to save a file with an encoding
+  # that is not UTF-8; if they choose to do so, we cannot do much about it
+  # except sitting back and seeing them punished after they choose to escape a
+  # world of consistency (falling back to getOption('encoding') will not help
+  # because native.enc is also normally UTF-8 based on *nix)
+  if (!isWindows()) return('UTF-8')
+  size <- file.info(file)[, 'size']
+  if (is.na(size)) stop('Cannot access the file ', file)
+  # BOM is 3 bytes, so if the file contains BOM, it must be at least 3 bytes
+  if (size < 3L) return('UTF-8')
+
+  # check if there is a BOM character: this is also skipped on *nix, because R
+  # on *nix simply ignores this meaningless character if present, but it hurts
+  # on Windows
+  if (identical(charToRaw(readChar(file, 3L, TRUE)), charToRaw('\UFEFF'))) {
+    warning('You should not include the Byte Order Mark (BOM) in ', file, '. ',
+            'Please re-save it in UTF-8 without BOM. See ',
+            'http://shiny.rstudio.com/articles/unicode.html for more info.')
+    return('UTF-8-BOM')
+  }
+  'UTF-8'
+}
+
+# read a file using UTF-8 and (on Windows) convert to native encoding if possible
+readUTF8 <- function(file) {
+  enc <- checkEncoding(file)
+  file <- base::file(file, encoding = enc)
+  on.exit(close(file), add = TRUE)
+  x <- enc2utf8(readLines(file, warn = FALSE))
+  tryNativeEncoding(x)
+}
+
+# if the UTF-8 string can be represented in the native encoding, use native encoding
+tryNativeEncoding <- function(string) {
+  if (!isWindows()) return(string)
+  string2 <- enc2native(string)
+  if (identical(enc2utf8(string2), string)) string2 else string
+}
+
+# similarly, try to source() a file with UTF-8
+sourceUTF8 <- function(file, envir = globalenv()) {
+  lines <- readUTF8(file)
+  enc <- if (any(Encoding(lines) == 'UTF-8')) 'UTF-8' else 'unknown'
+  src <- srcfilecopy(file, lines, isFile = TRUE)  # source reference info
+  # oddly, parse(file) does not work when file contains multibyte chars that
+  # **can** be encoded natively on Windows (might be a bug in base R); we
+  # rewrite the source code in a natively encoded temp file and parse it in this
+  # case (the source reference is still pointed to the original file, though)
+  if (isWindows() && enc == 'unknown') {
+    file <- tempfile(); on.exit(unlink(file), add = TRUE)
+    writeLines(lines, file)
+  }
+  exprs <- parse(file, keep.source = FALSE, srcfile = src, encoding = enc)
+
+  # Wrap the exprs in first `{`, then ..stacktraceon..(). It's only really the
+  # ..stacktraceon..() that we care about, but the `{` is needed to make that
+  # possible.
+  exprs <- makeCall(`{`, exprs)
+  # Need to wrap exprs in a list because we want it treated as a single argument
+  exprs <- makeCall(..stacktraceon.., list(exprs))
+
+  eval(exprs, envir)
+}
+
+# @param func Name of function, in unquoted form
+# @param args An evaluated list of unevaluated argument expressions
+makeCall <- function(func, args) {
+  as.call(c(list(substitute(func)), args))
+}
+
+# a workaround for https://bugs.r-project.org/bugzilla3/show_bug.cgi?id=16264
+srcfilecopy <- function(filename, lines, ...) {
+  if (getRversion() > '3.2.2') return(base::srcfilecopy(filename, lines, ...))
+  src <- base::srcfilecopy(filename, lines = '', ...)
+  src$lines <- lines
+  src
+}
+
+# write text as UTF-8
+writeUTF8 <- function(text, ...) {
+  text <- enc2utf8(text)
+  writeLines(text, ..., useBytes = TRUE)
+}
+
+URLdecode <- decodeURIComponent
+URLencode <- function(value, reserved = FALSE) {
+  value <- enc2utf8(value)
+  if (reserved) encodeURIComponent(value) else encodeURI(value)
+}
+
+
+# This function takes a name and function, and it wraps that function in a new
+# function which calls the original function using the specified name. This can
+# be helpful for profiling, because the specified name will show up on the stack
+# trace.
+wrapFunctionLabel <- function(func, name, ..stacktraceon = FALSE) {
+  if (name == "name" || name == "func" || name == "relabelWrapper") {
+    stop("Invalid name for wrapFunctionLabel: ", name)
+  }
+  assign(name, func, environment())
+
+  relabelWrapper <- eval(substitute(
+    function(...) {
+      # This `f` gets renamed to the value of `name`. Note that it may not
+      # print as the new name, because of source refs stored in the function.
+      if (..stacktraceon)
+        ..stacktraceon..(f(...))
+      else
+        f(...)
+    },
+    list(f = as.name(name))
+  ))
+
+  relabelWrapper
 }

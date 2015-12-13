@@ -1,19 +1,17 @@
-Context <- setRefClass(
+Context <- R6Class(
   'Context',
-  fields = list(
-    id = 'character',
-    .label = 'character',      # For debug purposes
-    .invalidated = 'logical',
-    .invalidateCallbacks = 'list',
-    .flushCallbacks = 'list',
-    .domain = 'ANY'
-  ),
-  methods = list(
+  portable = FALSE,
+  class = FALSE,
+  public = list(
+    id = character(0),
+    .label = character(0),      # For debug purposes
+    .invalidated = FALSE,
+    .invalidateCallbacks = list(),
+    .flushCallbacks = list(),
+    .domain = NULL,
+
     initialize = function(domain, label='', type='other', prevId='') {
       id <<- .getReactiveEnvironment()$nextId()
-      .invalidated <<- FALSE
-      .invalidateCallbacks <<- list()
-      .flushCallbacks <<- list()
       .label <<- label
       .domain <<- domain
       .graphCreateContext(id, label, type, prevId, domain)
@@ -23,10 +21,8 @@ Context <- setRefClass(
       withReactiveDomain(.domain, {
         env <- .getReactiveEnvironment()
         .graphEnterContext(id)
-        tryCatch(
-          env$runWith(.self, func),
-          finally = .graphExitContext(id)
-        )
+        on.exit(.graphExitContext(id), add = TRUE)
+        env$runWith(self, func)
       })
     },
     invalidate = function() {
@@ -56,7 +52,10 @@ Context <- setRefClass(
     addPendingFlush = function(priority) {
       "Tell the reactive environment that this context should be flushed the
         next time flushReact() called."
-      .getReactiveEnvironment()$addPendingFlush(.self, priority)
+      if (!is.null(.domain)) {
+        .domain$incrementBusyCount()
+      }
+      .getReactiveEnvironment()$addPendingFlush(self, priority)
     },
     onFlush = function(func) {
       "Register a function to be called when this context is flushed."
@@ -64,33 +63,32 @@ Context <- setRefClass(
     },
     executeFlushCallbacks = function() {
       "For internal use only."
-      lapply(.flushCallbacks, function(func) {
-        withCallingHandlers({
-          func()
-        }, warning = function(e) {
-          # TODO: Callbacks in app
-        }, error = function(e) {
-          # TODO: Callbacks in app
-        })
+
+      on.exit({
+        if (!is.null(.domain)) {
+          .domain$decrementBusyCount()
+        }
+      }, add = TRUE)
+
+      lapply(.flushCallbacks, function(flushCallback) {
+        flushCallback()
       })
     }
   )
 )
 
-ReactiveEnvironment <- setRefClass(
+ReactiveEnvironment <- R6Class(
   'ReactiveEnvironment',
-  fields = list(
-    .currentContext = 'ANY',
-    .nextId = 'integer',
+  portable = FALSE,
+  class = FALSE,
+  public = list(
+    .currentContext = NULL,
+    .nextId = 0L,
     .pendingFlush = 'PriorityQueue',
-    .inFlush = 'logical'
-  ),
-  methods = list(
+    .inFlush = FALSE,
+
     initialize = function() {
-      .currentContext <<- NULL
-      .nextId <<- 0L
       .pendingFlush <<- PriorityQueue$new()
-      .inFlush <<- FALSE
     },
     nextId = function() {
       .nextId <<- .nextId + 1L
@@ -98,7 +96,7 @@ ReactiveEnvironment <- setRefClass(
     },
     currentContext = function() {
       if (is.null(.currentContext)) {
-        if (isTRUE(getOption('shiny.suppressMissingContextError', FALSE))) {
+        if (isTRUE(getOption('shiny.suppressMissingContextError'))) {
           return(getDummyContext())
         } else {
           stop('Operation not allowed without an active reactive context. ',
@@ -108,11 +106,11 @@ ReactiveEnvironment <- setRefClass(
       }
       return(.currentContext)
     },
-    runWith = function(ctx, func) {
+    runWith = function(ctx, contextFunc) {
       old.ctx <- .currentContext
       .currentContext <<- ctx
       on.exit(.currentContext <<- old.ctx)
-      shinyCallingHandlers(func())
+      contextFunc()
     },
     addPendingFlush = function(ctx, priority) {
       .pendingFlush$enqueue(ctx, priority)
@@ -138,7 +136,7 @@ ReactiveEnvironment <- setRefClass(
       reactiveEnvironment <<- ReactiveEnvironment$new()
     return(reactiveEnvironment)
   }
-}) 
+})
 
 # Causes any pending invalidations to run.
 flushReact <- function() {

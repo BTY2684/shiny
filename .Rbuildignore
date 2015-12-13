@@ -6,8 +6,13 @@
 ^shiny\.cmd$
 ^run\.R$
 ^\.gitignore$
+^smoketests$
 ^res$
 ^man-roxygen$
 ^\.travis\.yml$
 ^staticdocs$
 ^tools$
+^srcjs$
+^CONTRIBUTING.md$
+^cran-comments.md$
+^.*\.o$

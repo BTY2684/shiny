@@ -46,7 +46,7 @@ untar2 <- function(tarfile, files = NULL, list = FALSE, exdir = ".")
     mydir.create <- function(path, ...) {
         ## for Windows' sake
         path <- sub("[\\/]$", "", path)
-        if(file_test("-d", path)) return()
+        if(utils::file_test("-d", path)) return()
         if(!dir.create(path, showWarnings = TRUE, recursive = TRUE, ...))
            stop(gettextf("failed to create directory %s", sQuote(path)),
                 domain = NA)
@@ -141,7 +141,7 @@ untar2 <- function(tarfile, files = NULL, list = FALSE, exdir = ".")
                             warning(gettextf("failed to copy %s to %s", sQuote(name2), sQuote(name)), domain = NA)
                     }
                 } else {
-                    if(.Platform$OS.type == "windows") {
+                    if(isWindows()) {
                         ## this will not work for links to dirs
                         from <- file.path(dirname(name), name2)
                         if (!file.copy(from, name))

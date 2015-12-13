@@ -54,38 +54,6 @@ updateTextInput <- function(session, inputId, label = NULL, value = NULL) {
 updateCheckboxInput <- updateTextInput
 
 
-#' Change the value of a slider input on the client
-#'
-#' @template update-input
-#' @param value The value to set for the input object.
-#'
-#' @seealso \code{\link{sliderInput}}
-#'
-#' @examples
-#' \dontrun{
-#' shinyServer(function(input, output, session) {
-#'
-#'   observe({
-#'     # We'll use the input$controller variable multiple times, so save it as x
-#'     # for convenience.
-#'     x <- input$controller
-#'
-#'     # Similar to number and text. only label and value can be set for slider
-#'     updateSliderInput(session, "inSlider",
-#'       label = paste("Slider label", x),
-#'       value = x)
-#'
-#'     # For sliders that pick out a range, pass in a vector of 2 values.
-#'     updateSliderInput(session, "inSlider2", value = c(x-1, x+1))
-#'
-#'     # An NA means to not change that value (the low or high one)
-#'     updateSliderInput(session, "inSlider3", value = c(NA, x+2))
-#'   })
-#' })
-#' }
-#' @export
-updateSliderInput <- updateTextInput
-
 #' Change the value of a date input on the client
 #'
 #' @template update-input
@@ -118,7 +86,7 @@ updateSliderInput <- updateTextInput
 #' }
 #' @export
 updateDateInput <- function(session, inputId, label = NULL, value = NULL,
-    min = NULL, max = NULL) {
+                            min = NULL, max = NULL) {
 
   # If value is a date object, convert it to a string with yyyy-mm-dd format
   # Same for min and max
@@ -163,8 +131,8 @@ updateDateInput <- function(session, inputId, label = NULL, value = NULL,
 #' }
 #' @export
 updateDateRangeInput <- function(session, inputId, label = NULL,
-    start = NULL, end = NULL, min = NULL, max = NULL) {
-
+                                 start = NULL, end = NULL, min = NULL,
+                                 max = NULL) {
   # Make sure start and end are strings, not date objects. This is for
   # consistency across different locales.
   if (inherits(start, "Date"))  start <- format(start, '%Y-%m-%d')
@@ -217,6 +185,13 @@ updateTabsetPanel <- function(session, inputId, selected = NULL) {
   session$sendInputMessage(inputId, message)
 }
 
+#' @rdname updateTabsetPanel
+#' @export
+updateNavbarPage <- updateTabsetPanel
+
+#' @rdname updateTabsetPanel
+#' @export
+updateNavlistPanel <- updateTabsetPanel
 
 #' Change the value of a number input on the client
 #'
@@ -256,13 +231,101 @@ updateNumericInput <- function(session, inputId, label = NULL, value = NULL,
   session$sendInputMessage(inputId, message)
 }
 
+#' Change the value of a slider input on the client
+#'
+#' @template update-input
+#' @param value The value to set for the input object.
+#' @param min Minimum value.
+#' @param max Maximum value.
+#' @param step Step size.
+#'
+#' @seealso \code{\link{sliderInput}}
+#'
+#' @examples
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   shinyApp(
+#'     ui = fluidPage(
+#'       sidebarLayout(
+#'         sidebarPanel(
+#'           p("The first slider controls the second"),
+#'           sliderInput("control", "Controller:", min=0, max=20, value=10,
+#'                        step=1),
+#'           sliderInput("receive", "Receiver:", min=0, max=20, value=10,
+#'                        step=1)
+#'         ),
+#'         mainPanel()
+#'       )
+#'     ),
+#'     server = function(input, output, session) {
+#'       observe({
+#'         val <- input$control
+#'         # Control the value, min, max, and step.
+#'         # Step size is 2 when input value is even; 1 when value is odd.
+#'         updateSliderInput(session, "receive", value = val,
+#'           min = floor(val/2), max = val+4, step = (val+1)%%2 + 1)
+#'       })
+#'     }
+#'   )
+#' }
+#' @export
+updateSliderInput <- function(session, inputId, label = NULL, value = NULL,
+  min = NULL, max = NULL, step = NULL)
+{
+  # Make sure that value, min, max all have the same type, because we need
+  # special handling for dates and datetimes.
+  vals <- dropNulls(list(value, min, max))
+
+  type <- unique(lapply(vals, function(x) {
+    if      (inherits(x, "Date"))   "date"
+    else if (inherits(x, "POSIXt")) "datetime"
+    else                            "number"
+  }))
+  if (length(type) > 1) {
+    stop("Type mismatch for value, min, and max")
+  }
+
+  if ((length(type) == 1) && (type == "date" || type == "datetime")) {
+    to_ms <- function(x) 1000 * as.numeric(as.POSIXct(x))
+    if (!is.null(min))   min   <- to_ms(min)
+    if (!is.null(max))   max   <- to_ms(max)
+    if (!is.null(value)) value <- to_ms(value)
+  }
+
+  message <- dropNulls(list(
+    label = label,
+    value = formatNoSci(value),
+    min = formatNoSci(min),
+    max = formatNoSci(max),
+    step = formatNoSci(step)
+  ))
+  session$sendInputMessage(inputId, message)
+}
+
+
+updateInputOptions <- function(session, inputId, label = NULL, choices = NULL,
+                               selected = NULL, inline = FALSE,
+                               type = 'checkbox') {
+  if (!is.null(choices))
+    choices <- choicesWithNames(choices)
+  if (!is.null(selected))
+    selected <- validateSelected(selected, choices, inputId)
+
+  options <- if (!is.null(choices)) {
+    format(tagList(
+      generateOptions(inputId, choices, selected, inline, type = type)
+    ))
+  }
+
+  message <- dropNulls(list(label = label, options = options, value = selected))
+
+  session$sendInputMessage(inputId, message)
+}
 
 #' Change the value of a checkbox group input on the client
 #'
 #' @template update-input
-#' @param choices A named vector or named list of options. For each item, the
-#'   name will be used as the label, and the value will be used as the value.
-#' @param selected A vector or list of options (values) which will be selected.
+#' @inheritParams checkboxGroupInput
 #'
 #' @seealso \code{\link{checkboxGroupInput}}
 #'
@@ -295,27 +358,16 @@ updateNumericInput <- function(session, inputId, label = NULL, value = NULL,
 #' }
 #' @export
 updateCheckboxGroupInput <- function(session, inputId, label = NULL,
-  choices = NULL, selected = NULL) {
-
-  choices <- choicesWithNames(choices)
-  if (!is.null(selected))
-    selected <- validateSelected(selected, choices, inputId)
-
-  options <- if (length(choices))
-    columnToRowData(list(value = choices, label = names(choices)))
-
-  message <- dropNulls(list(label = label, options = options, value = selected))
-
-  session$sendInputMessage(inputId, message)
+                                     choices = NULL, selected = NULL,
+                                     inline = FALSE) {
+  updateInputOptions(session, inputId, label, choices, selected, inline)
 }
 
 
 #' Change the value of a radio input on the client
 #'
 #' @template update-input
-#' @param choices A named vector or named list of options. For each item, the
-#'   name will be used as the label, and the value will be used as the value.
-#' @param selected A vector or list of options (values) which will be selected.
+#' @inheritParams radioButtons
 #'
 #' @seealso \code{\link{radioButtons}}
 #'
@@ -345,15 +397,18 @@ updateCheckboxGroupInput <- function(session, inputId, label = NULL,
 #' })
 #' }
 #' @export
-updateRadioButtons <- updateCheckboxGroupInput
+updateRadioButtons <- function(session, inputId, label = NULL, choices = NULL,
+                               selected = NULL, inline = FALSE) {
+  # you must select at least one radio button
+  if (is.null(selected) && !is.null(choices)) selected <- choices[[1]]
+  updateInputOptions(session, inputId, label, choices, selected, inline, type = 'radio')
+}
 
 
 #' Change the value of a select input on the client
 #'
 #' @template update-input
-#' @param choices A named vector or named list of options. For each item, the
-#'   name will be used as the label, and the value will be used as the value.
-#' @param selected A vector or list of options (values) which will be selected.
+#' @inheritParams selectInput
 #'
 #' @seealso \code{\link{selectInput}}
 #'
@@ -386,19 +441,26 @@ updateRadioButtons <- updateCheckboxGroupInput
 #' })
 #' }
 #' @export
-updateSelectInput <- updateCheckboxGroupInput
+updateSelectInput <- function(session, inputId, label = NULL, choices = NULL,
+                              selected = NULL) {
+  choices <- if (!is.null(choices)) choicesWithNames(choices)
+  if (!is.null(selected))
+    selected <- validateSelected(selected, choices, inputId)
+  options <- if (!is.null(choices)) selectOptions(choices, selected)
+  message <- dropNulls(list(label = label, options = options, value = selected))
+  session$sendInputMessage(inputId, message)
+}
 
 #' @rdname updateSelectInput
-#' @param options a list of options (see \code{\link{selectizeInput}})
+#' @inheritParams selectizeInput
 #' @param server whether to store \code{choices} on the server side, and load
 #'   the select options dynamically on searching, instead of writing all
 #'   \code{choices} into the page at once (i.e., only use the client-side
 #'   version of \pkg{selectize.js})
 #' @export
-updateSelectizeInput <- function(
-  session, inputId, label = NULL, choices = NULL, selected = NULL,
-  options = list(), server = FALSE
-) {
+updateSelectizeInput <- function(session, inputId, label = NULL, choices = NULL,
+                                 selected = NULL, options = list(),
+                                 server = FALSE) {
   if (length(options)) {
     res <- checkAsIs(options)
     cfg <- tags$script(
@@ -407,22 +469,16 @@ updateSelectizeInput <- function(
       `data-eval` = if (length(res$eval)) HTML(toJSON(res$eval)),
       HTML(toJSON(res$options))
     )
-    session$sendInputMessage(inputId, list(newOptions = as.character(cfg)))
+    session$sendInputMessage(inputId, list(config = as.character(cfg)))
   }
   if (!server) {
     return(updateSelectInput(session, inputId, label, choices, selected))
   }
-  # in the server mode, the choices are not available before we type, so we
-  # cannot really pre-select any options, but here we insert the `selected`
-  # options into selectize forcibly
   value <- unname(selected)
-  selected <- choicesWithNames(selected)
+  attr(choices, 'selected_value') <- value
   message <- dropNulls(list(
     label = label,
     value = value,
-    selected = if (length(selected)) {
-      columnToRowData(list(label = names(selected), value = selected))
-    },
     url = session$registerDataObj(inputId, choices, selectizeJSON)
   ))
   session$sendInputMessage(inputId, message)
@@ -431,18 +487,20 @@ updateSelectizeInput <- function(
 selectizeJSON <- function(data, req) {
   query <- parseQueryString(req$QUERY_STRING)
   # extract the query variables, conjunction (and/or), search string, maximum options
-  var <- fromJSON(query$field)
+  var <- c(jsonlite::fromJSON(query$field))
   cjn <- if (query$conju == 'and') all else any
   # all keywords in lower-case, for case-insensitive matching
   key <- unique(strsplit(tolower(query$query), '\\s+')[[1]])
   if (identical(key, '')) key <- character(0)
-  mop <- query$maxop
+  mop <- as.numeric(query$maxop)
+  vfd <- query$value  # the value field name
+  sel <- attr(data, 'selected_value', exact = TRUE)
 
   # convert a single vector to a data frame so it returns {label: , value: }
   # later in JSON; other objects return arbitrary JSON {x: , y: , foo: , ...}
   data <- if (is.atomic(data)) {
-    data <- choicesWithNames(data)
-    data.frame(label = names(data), value = data, stringsAsFactors = FALSE)
+    data.frame(label = names(choicesWithNames(data)), value = data,
+               stringsAsFactors = FALSE)
   } else as.data.frame(data, stringsAsFactors = FALSE)
 
   # start searching for keywords in all specified columns
@@ -459,8 +517,14 @@ selectizeJSON <- function(data, req) {
     idx <- idx | apply(matches, 1, cjn)
   }
   # only return the first n rows (n = maximum options in configuration)
-  idx <- head(which(idx), mop)
+  idx <- utils::head(if (length(key)) which(idx) else seq_along(idx), mop)
+  # make sure the selected value is in the data
+  if (length(sel)) {
+    i <- na.omit(match(sel, data[, vfd]))
+    if (length(i)) idx <- sort(utils::head(unique(c(i, idx)), mop))
+  }
   data <- data[idx, ]
 
-  httpResponse(200, 'application/json', toJSON(columnToRowData(data)))
+  res <- toJSON(columnToRowData(data))
+  httpResponse(200, 'application/json', enc2utf8(res))
 }

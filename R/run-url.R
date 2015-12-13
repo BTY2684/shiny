@@ -14,18 +14,22 @@
 #' @param subdir A subdirectory in the repository that contains the app. By
 #'   default, this function will run an app from the top level of the repo, but
 #'   you can use a path such as `\code{"inst/shinyapp"}.
+#' @param destdir Directory to store the downloaded application files. If \code{NULL}
+#'   (the default), the application files will be stored in a temporary directory
+#'   and removed when the app exits
 #' @param ... Other arguments to be passed to \code{\link{runApp}()}, such as
 #'   \code{port} and \code{launch.browser}.
 #' @export
 #' @examples
-#' \dontrun{
-#' runUrl('https://github.com/rstudio/shiny_example/archive/master.tar.gz')
+#' ## Only run this example in interactive R sessions
+#'   if (interactive()) {
+#'   runUrl('https://github.com/rstudio/shiny_example/archive/master.tar.gz')
 #'
-#' # Can run an app from a subdirectory in the archive
-#' runUrl("https://github.com/rstudio/shiny_example/archive/master.zip",
-#'  subdir = "inst/shinyapp/")
+#'   # Can run an app from a subdirectory in the archive
+#'   runUrl("https://github.com/rstudio/shiny_example/archive/master.zip",
+#'     subdir = "inst/shinyapp/")
 #' }
-runUrl <- function(url, filetype = NULL, subdir = NULL, ...) {
+runUrl <- function(url, filetype = NULL, subdir = NULL, destdir = NULL, ...) {
 
   if (!is.null(subdir) && ".." %in% strsplit(subdir, '/')[[1]])
     stop("'..' not allowed in subdir")
@@ -43,8 +47,14 @@ runUrl <- function(url, filetype = NULL, subdir = NULL, ...) {
     stop("Unknown file extension.")
 
   message("Downloading ", url)
-  filePath <- tempfile('shinyapp', fileext=fileext)
-  fileDir  <- tempfile('shinyapp')
+  if (is.null(destdir)) {
+    filePath <- tempfile('shinyapp', fileext = fileext)
+    fileDir  <- tempfile('shinyapp')
+  } else {
+    fileDir <- destdir
+    filePath <- paste(destdir, fileext)
+  }
+
   dir.create(fileDir, showWarnings = FALSE)
   if (download(url, filePath, mode = "wb", quiet = TRUE) != 0)
     stop("Failed to download URL ", url)
@@ -61,13 +71,16 @@ runUrl <- function(url, filetype = NULL, subdir = NULL, ...) {
     untar2(filePath, exdir = fileDir)
 
   } else if (fileext == ".zip") {
-    first <- as.character(unzip(filePath, list=TRUE)$Name)[1]
-    unzip(filePath, exdir = fileDir)
+    first <- as.character(utils::unzip(filePath, list=TRUE)$Name)[1]
+    utils::unzip(filePath, exdir = fileDir)
   }
-  on.exit(unlink(fileDir, recursive = TRUE), add = TRUE)
+
+  if(is.null(destdir)){
+    on.exit(unlink(fileDir, recursive = TRUE), add = TRUE)
+  }
 
   appdir <- file.path(fileDir, first)
-  if (!file_test('-d', appdir)) appdir <- dirname(appdir)
+  if (!utils::file_test('-d', appdir)) appdir <- dirname(appdir)
 
   if (!is.null(subdir)) appdir <- file.path(appdir, subdir)
   runApp(appdir, ...)
@@ -80,15 +93,16 @@ runUrl <- function(url, filetype = NULL, subdir = NULL, ...) {
 #'   all valid values.
 #' @export
 #' @examples
-#' \dontrun{
-#' runGist(3239667)
-#' runGist("https://gist.github.com/jcheng5/3239667")
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   runGist(3239667)
+#'   runGist("https://gist.github.com/jcheng5/3239667")
 #'
-#' # Old URL format without username
-#' runGist("https://gist.github.com/3239667")
+#'   # Old URL format without username
+#'   runGist("https://gist.github.com/3239667")
 #' }
 #'
-runGist <- function(gist, ...) {
+runGist <- function(gist, destdir = NULL, ...) {
 
   gistUrl <- if (is.numeric(gist) || grepl('^[0-9a-f]+$', gist)) {
     sprintf('https://gist.github.com/%s/download', gist)
@@ -98,7 +112,7 @@ runGist <- function(gist, ...) {
     stop('Unrecognized gist identifier format')
   }
 
-  runUrl(gistUrl, filetype=".tar.gz", ...)
+  runUrl(gistUrl, filetype = ".zip", destdir = destdir, ...)
 }
 
 
@@ -110,15 +124,16 @@ runGist <- function(gist, ...) {
 #'   Defaults to \code{"master"}.
 #' @export
 #' @examples
-#' \dontrun{
-#' runGitHub("shiny_example", "rstudio")
-#' # or runGitHub("rstudio/shiny_example")
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   runGitHub("shiny_example", "rstudio")
+#'   # or runGitHub("rstudio/shiny_example")
 #'
-#' # Can run an app from a subdirectory in the repo
-#' runGitHub("shiny_example", "rstudio", subdir = "inst/shinyapp/")
+#'   # Can run an app from a subdirectory in the repo
+#'   runGitHub("shiny_example", "rstudio", subdir = "inst/shinyapp/")
 #' }
 runGitHub <- function(repo, username = getOption("github.user"),
-                      ref = "master", subdir = NULL, ...) {
+                      ref = "master", subdir = NULL, destdir = NULL, ...) {
 
   if (grepl('/', repo)) {
     res <- strsplit(repo, '/')[[1]]
@@ -130,5 +145,5 @@ runGitHub <- function(repo, username = getOption("github.user"),
   url <- paste("https://github.com/", username, "/", repo, "/archive/",
                ref, ".tar.gz", sep = "")
 
-  runUrl(url, subdir=subdir, ...)
+  runUrl(url, subdir = subdir, destdir = destdir, ...)
 }

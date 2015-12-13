@@ -14,7 +14,7 @@ NULL
 #' # now we can just write "static" content without withMathJax()
 #' div("more math here $$\\sqrt{2}$$")
 withMathJax <- function(...) {
-  path <- 'https://c328740.ssl.cf1.rackcdn.com/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML'
+  path <- 'https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML'
   tagList(
     tags$head(
       singleton(tags$script(src = path, type = 'text/javascript'))
@@ -27,15 +27,21 @@ withMathJax <- function(...) {
 renderPage <- function(ui, connection, showcase=0) {
 
   if (showcase > 0)
-    ui <- tagList(tags$head(showcaseHead()), ui)
+    ui <- showcaseUI(ui)
+
+  # Wrap ui in body tag if it doesn't already have a single top-level body tag.
+  if (!(inherits(ui, "shiny.tag") && ui$name == "body"))
+    ui <- tags$body(ui)
 
   result <- renderTags(ui)
 
   deps <- c(
     list(
-      htmlDependency("jquery", "1.11.0", c(href="shared"), script = "jquery.js"),
-      htmlDependency("shiny", packageVersion("shiny"), c(href="shared"),
-        script = "shiny.js", stylesheet = "shiny.css")
+      htmlDependency("json2", "2014.02.04", c(href="shared"), script = "json2-min.js"),
+      htmlDependency("jquery", "1.11.3", c(href="shared"), script = "jquery.min.js"),
+      htmlDependency("shiny", utils::packageVersion("shiny"), c(href="shared"),
+        script = if (getOption("shiny.minified", TRUE)) "shiny.min.js" else "shiny.js",
+        stylesheet = "shiny.css")
     ),
     result$dependencies
   )
@@ -47,7 +53,7 @@ renderPage <- function(ui, connection, showcase=0) {
   depHtml <- renderDependencies(deps, "href")
 
   # write preamble
-  writeLines(c('<!DOCTYPE html>',
+  writeUTF8(c('<!DOCTYPE html>',
                '<html>',
                '<head>',
                '  <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>',
@@ -60,34 +66,25 @@ renderPage <- function(ui, connection, showcase=0) {
                depHtml
               ),
               con = connection)
-  writeLines(c(result$head,
+  writeUTF8(c(result$head,
                '</head>',
-               '<body>',
                recursive=TRUE),
              con = connection)
 
-  if (showcase > 0) {
-    # in showcase mode, emit containing elements and app HTML
-    writeLines(as.character(showcaseBody(result$html)),
-               con = connection)
-  } else {
-    # in normal mode, write UI html directly to connection
-    writeLines(result$html, con = connection)
-  }
+  writeUTF8(result$html, con = connection)
 
   # write end document
-  writeLines(c('</body>',
-               '</html>'),
+  writeUTF8('</html>',
              con = connection)
 }
 
 #' Create a Shiny UI handler
 #'
 #' Historically this function was used in ui.R files to register a user
-#' interface with Shiny. It is no longer required; simply ensure that the last
-#' expression to be returned from ui.R is a user interface. This function is
-#' kept for backwards compatibility with older applications. It returns the
-#' value that is passed to it.
+#' interface with Shiny. It is no longer required as of Shiny 0.10; simply
+#' ensure that the last expression to be returned from ui.R is a user interface.
+#' This function is kept for backwards compatibility with older applications. It
+#' returns the value that is passed to it.
 #'
 #' @param ui A user interace definition
 #' @return The user interface definition, without modifications or side effects.
@@ -98,7 +95,7 @@ shinyUI <- function(ui) {
   ui
 }
 
-uiHttpHandler <- function(ui, path = "/") {
+uiHttpHandler <- function(ui, uiPattern = "^/$") {
 
   force(ui)
 
@@ -106,10 +103,10 @@ uiHttpHandler <- function(ui, path = "/") {
     if (!identical(req$REQUEST_METHOD, 'GET'))
       return(NULL)
 
-    if (req$PATH_INFO != path)
+    if (!isTRUE(grepl(uiPattern, req$PATH_INFO)))
       return(NULL)
 
-    textConn <- textConnection(NULL, "w")
+    textConn <- file(open = "w+")
     on.exit(close(textConn))
 
     showcaseMode <- .globals$showcaseDefault
@@ -119,15 +116,21 @@ uiHttpHandler <- function(ui, path = "/") {
         showcaseMode <- mode
     }
     uiValue <- if (is.function(ui)) {
-      if (length(formals(ui)) > 0)
-        ui(req)
-      else
-        ui()
-    }
-    else
+      if (length(formals(ui)) > 0) {
+        # No corresponding ..stacktraceoff.., this is pure user code
+        ..stacktraceon..(ui(req))
+      } else {
+        # No corresponding ..stacktraceoff.., this is pure user code
+        ..stacktraceon..(ui())
+      }
+    } else {
       ui
+    }
+    if (is.null(uiValue))
+      return(NULL)
+
     renderPage(uiValue, textConn, showcaseMode)
-    html <- paste(textConnectionValue(textConn), collapse='\n')
+    html <- paste(readLines(textConn, encoding = 'UTF-8'), collapse='\n')
     return(httpResponse(200, content=enc2utf8(html)))
   }
 }

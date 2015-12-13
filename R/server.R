@@ -1,109 +1,6 @@
-#' @include globals.R
+#' @include server-input-handlers.R
 
 appsByToken <- Map$new()
-
-# Create a map for input handlers and register the defaults.
-inputHandlers <- Map$new()
-
-#' Register an Input Handler
-#'
-#' Adds an input handler for data of this type. When called, Shiny will use the
-#' function provided to refine the data passed back from the client (after being
-#' deserialized by RJSONIO) before making it available in the \code{input}
-#' variable of the \code{server.R} file.
-#'
-#' This function will register the handler for the duration of the R process
-#' (unless Shiny is explicitly reloaded). For that reason, the \code{type} used
-#' should be very specific to this package to minimize the risk of colliding
-#' with another Shiny package which might use this data type name. We recommend
-#' the format of "packageName.widgetName".
-#'
-#' Currently Shiny registers the following handlers: \code{shiny.matrix},
-#' \code{shiny.number}, and \code{shiny.date}.
-#'
-#' The \code{type} of a custom Shiny Input widget will be deduced using the
-#' \code{getType()} JavaScript function on the registered Shiny inputBinding.
-#' @param type The type for which the handler should be added -- should be a
-#' single-element character vector.
-#' @param fun The handler function. This is the function that will be used to
-#'   parse the data delivered from the client before it is available in the
-#'   \code{input} variable. The function will be called with the following three
-#'   parameters:
-#'    \enumerate{
-#'      \item{The value of this input as provided by the client, deserialized
-#'      using RJSONIO.}
-#'      \item{The \code{shinysession} in which the input exists.}
-#'      \item{The name of the input.}
-#'    }
-#' @param force If \code{TRUE}, will overwrite any existing handler without
-#' warning. If \code{FALSE}, will throw an error if this class already has
-#' a handler defined.
-#' @examples
-#' \dontrun{
-#' # Register an input handler which rounds a input number to the nearest integer
-#' registerInputHandler("mypackage.validint", function(x, shinysession, name) {
-#'   if (is.null(x)) return(NA)
-#'   round(x)
-#' })
-#'
-#' ## On the Javascript side, the associated input binding must have a corresponding getType method:
-#' getType: function(el) {
-#'   return "mypackage.validint";
-#' }
-#'
-#' }
-#' @seealso \code{\link{removeInputHandler}}
-#' @export
-registerInputHandler <- function(type, fun, force=FALSE){
-  if (inputHandlers$containsKey(type) && !force){
-    stop("There is already an input handler for type: ", type)
-  }
-  inputHandlers$set(type, fun)
-}
-
-#' Deregister an Input Handler
-#'
-#' Removes an Input Handler. Rather than using the previously specified handler
-#' for data of this type, the default RJSONIO serialization will be used.
-#'
-#' @param type The type for which handlers should be removed.
-#' @return The handler previously associated with this \code{type}, if one
-#'   existed. Otherwise, \code{NULL}.
-#' @seealso \code{\link{registerInputHandler}}
-#' @export
-removeInputHandler <- function(type){
-  inputHandlers$remove(type)
-}
-
-# Takes a list-of-lists and returns a matrix. The lists
-# must all be the same length. NULL is replaced by NA.
-registerInputHandler("shiny.matrix", function(data, ...) {
-  if (length(data) == 0)
-    return(matrix(nrow=0, ncol=0))
-
-  m <- matrix(unlist(lapply(data, function(x) {
-    sapply(x, function(y) {
-      ifelse(is.null(y), NA, y)
-    })
-  })), nrow = length(data[[1]]), ncol = length(data))
-  return(m)
-})
-
-registerInputHandler("shiny.number", function(val, ...){
-  ifelse(is.null(val), NA, val)
-})
-
-registerInputHandler("shiny.date", function(val, ...){
-  # First replace NULLs with NA, then convert to Date vector
-  datelist <- ifelse(lapply(val, is.null), NA, val)
-  as.Date(unlist(datelist))
-})
-
-registerInputHandler("shiny.action", function(val, ...) {
-  # mark up the action button value with a special class so we can recognize it later
-  class(val) <- c(class(val), "shinyActionButtonValue")
-  val
-})
 
 # Provide a character representation of the WS that can be used
 # as a key in a Map.
@@ -169,13 +66,6 @@ addResourcePath <- function(prefix, directoryPath) {
 
   existing <- .globals$resources[[prefix]]
 
-  if (!is.null(existing)) {
-    if (!identical(existing$directoryPath, directoryPath)) {
-      warning("Overriding existing prefix ", prefix, " => ",
-              existing$directoryPath)
-    }
-  }
-
   .globals$resources[[prefix]] <- list(directoryPath=directoryPath,
                                        func=staticHandler(directoryPath))
 }
@@ -209,14 +99,15 @@ resourcePathHandler <- function(req) {
 #'
 #' Defines the server-side logic of the Shiny application. This generally
 #' involves creating functions that map user inputs to various kinds of output.
+#' In older versions of Shiny, it was necessary to call \code{shinyServer()} in
+#' the \code{server.R} file, but this is no longer required as of Shiny 0.10.
+#' Now the \code{server.R} file may simply return the appropriate server
+#' function (as the last expression in the code), without calling
+#' \code{shinyServer()}.
 #'
-#' @param func The server function for this application. See the details section
-#'   for more information.
-#'
-#' @details
-#' Call \code{shinyServer} from your application's \code{server.R} file, passing
-#' in a "server function" that provides the server-side logic of your
-#' application.
+#' Call \code{shinyServer} from your application's \code{server.R}
+#' file, passing in a "server function" that provides the server-side logic of
+#' your application.
 #'
 #' The server function will be called when each client (web browser) first loads
 #' the Shiny application's page. It must take an \code{input} and an
@@ -227,6 +118,9 @@ resourcePathHandler <- function(req) {
 #' See the \href{http://rstudio.github.com/shiny/tutorial/}{tutorial} for more
 #' on how to write a server function.
 #'
+#' @param func The server function for this application. See the details section
+#'   for more information.
+#'
 #' @examples
 #' \dontrun{
 #' # A very simple Shiny app that takes a message from the user
@@ -236,6 +130,16 @@ resourcePathHandler <- function(req) {
 #'     toupper(input$message)
 #'   })
 #' })
+#'
+#'
+#' # It is also possible for a server.R file to simply return the function,
+#' # without calling shinyServer().
+#' # For example, the server.R file could contain just the following:
+#' function(input, output, session) {
+#'   output$uppercase <- renderText({
+#'     toupper(input$message)
+#'   })
+#' }
 #' }
 #'
 #' @export
@@ -249,8 +153,12 @@ decodeMessage <- function(data) {
     packBits(rawToBits(data[pos:(pos+3)]), type='integer')
   }
 
-  if (readInt(1) != 0x01020202L)
-    return(fromJSON(rawToChar(data), asText=TRUE, simplify=FALSE, encoding='UTF-8'))
+  if (readInt(1) != 0x01020202L) {
+    # Treat message as UTF-8
+    charData <- rawToChar(data)
+    Encoding(charData) <- 'UTF-8'
+    return(jsonlite::fromJSON(charData, simplifyVector=FALSE))
+  }
 
   i <- 5
   parts <- list()
@@ -278,7 +186,7 @@ createAppHandlers <- function(httpHandlers, serverFuncSource) {
   # This value, if non-NULL, must be present on all HTTP and WebSocket
   # requests as the Shiny-Shared-Secret header or else access will be
   # denied (403 response for HTTP, and instant close for websocket).
-  sharedSecret <- getOption('shiny.sharedSecret', NULL)
+  sharedSecret <- getOption('shiny.sharedSecret')
 
   appHandlers <- list(
     http = joinHandlers(c(
@@ -294,150 +202,171 @@ createAppHandlers <- function(httpHandlers, serverFuncSource) {
         return(TRUE)
       }
 
+      if (!is.null(getOption("shiny.observer.error", NULL))) {
+        warning(
+          call. = FALSE,
+          "options(shiny.observer.error) is no longer supported; please unset it!"
+        )
+        stopApp()
+      }
+
       shinysession <- ShinySession$new(ws)
       appsByToken$set(shinysession$token, shinysession)
       shinysession$setShowcase(.globals$showcaseDefault)
 
-      ws$onMessage(function(binary, msg) {
-        # To ease transition from websockets-based code. Should remove once we're stable.
-        if (is.character(msg))
-          msg <- charToRaw(msg)
+      messageHandler <- function(binary, msg) {
+        withReactiveDomain(shinysession, {
+          # To ease transition from websockets-based code. Should remove once we're stable.
+          if (is.character(msg))
+            msg <- charToRaw(msg)
 
-        if (getOption('shiny.trace', FALSE)) {
-          if (binary)
-            message("RECV ", '$$binary data$$')
-          else
-            message("RECV ", rawToChar(msg))
-        }
+          if (isTRUE(getOption('shiny.trace'))) {
+            if (binary)
+              message("RECV ", '$$binary data$$')
+            else
+              message("RECV ", rawToChar(msg))
+          }
 
-        if (identical(charToRaw("\003\xe9"), msg))
-          return()
+          if (identical(charToRaw("\003\xe9"), msg))
+            return()
 
-        msg <- decodeMessage(msg)
+          msg <- decodeMessage(msg)
 
-        # Do our own list simplifying here. sapply/simplify2array give names to
-        # character vectors, which is rarely what we want.
-        if (!is.null(msg$data)) {
-          for (name in names(msg$data)) {
-            val <- msg$data[[name]]
+          # Do our own list simplifying here. sapply/simplify2array give names to
+          # character vectors, which is rarely what we want.
+          if (!is.null(msg$data)) {
+            for (name in names(msg$data)) {
+              val <- msg$data[[name]]
 
-            splitName <- strsplit(name, ':')[[1]]
-            if (length(splitName) > 1) {
-              msg$data[[name]] <- NULL
+              splitName <- strsplit(name, ':')[[1]]
+              if (length(splitName) > 1) {
+                msg$data[[name]] <- NULL
 
-              if (!inputHandlers$containsKey(splitName[[2]])){
-                # No input handler registered for this type
-                stop("No handler registered for for type ", name)
-              }
+                if (!inputHandlers$containsKey(splitName[[2]])){
+                  # No input handler registered for this type
+                  stop("No handler registered for for type ", name)
+                }
 
-              msg$data[[ splitName[[1]] ]] <-
+                msg$data[[ splitName[[1]] ]] <-
                   inputHandlers$get(splitName[[2]])(
-                      val,
-                      shinysession,
-                      splitName[[1]] )
-            }
-            else if (is.list(val) && is.null(names(val))) {
-              val_flat <- unlist(val, recursive = TRUE)
+                    val,
+                    shinysession,
+                    splitName[[1]] )
+              }
+              else if (is.list(val) && is.null(names(val))) {
+                val_flat <- unlist(val, recursive = TRUE)
 
-              if (is.null(val_flat)) {
-                # This is to assign NULL instead of deleting the item
-                msg$data[name] <- list(NULL)
-              } else {
-                msg$data[[name]] <- val_flat
+                if (is.null(val_flat)) {
+                  # This is to assign NULL instead of deleting the item
+                  msg$data[name] <- list(NULL)
+                } else {
+                  msg$data[[name]] <- val_flat
+                }
               }
             }
           }
-        }
 
-        switch(
-          msg$method,
-          init = {
+          switch(
+            msg$method,
+            init = {
 
-            serverFunc <- serverFuncSource()
-            if (!identicalFunctionBodies(serverFunc, appvars$server)) {
-              appvars$server <- serverFunc
-              if (!is.null(appvars$server))
-              {
-                # Tag this function as the Shiny server function. A debugger may use this
-                # tag to give this function special treatment.
-                # It's very important that it's appvars$server itself and NOT a copy that
-                # is invoked, otherwise new breakpoints won't be picked up.
-                attr(appvars$server, "shinyServerFunction") <- TRUE
-                registerDebugHook("server", appvars, "Server Function")
+              serverFunc <- withReactiveDomain(NULL, serverFuncSource())
+              if (!identicalFunctionBodies(serverFunc, appvars$server)) {
+                appvars$server <- serverFunc
+                if (!is.null(appvars$server))
+                {
+                  # Tag this function as the Shiny server function. A debugger may use this
+                  # tag to give this function special treatment.
+                  # It's very important that it's appvars$server itself and NOT a copy that
+                  # is invoked, otherwise new breakpoints won't be picked up.
+                  attr(appvars$server, "shinyServerFunction") <- TRUE
+                  registerDebugHook("server", appvars, "Server Function")
+                }
               }
-            }
 
-            # Check for switching into/out of showcase mode
-            if (.globals$showcaseOverride &&
-                exists(".clientdata_url_search", where = msg$data)) {
-              mode <- showcaseModeOfQuerystring(msg$data$.clientdata_url_search)
-              if (!is.null(mode))
-                shinysession$setShowcase(mode)
-            }
+              # Check for switching into/out of showcase mode
+              if (.globals$showcaseOverride &&
+                  exists(".clientdata_url_search", where = msg$data)) {
+                mode <- showcaseModeOfQuerystring(msg$data$.clientdata_url_search)
+                if (!is.null(mode))
+                  shinysession$setShowcase(mode)
+              }
 
-            shinysession$manageInputs(msg$data)
+              shinysession$manageInputs(msg$data)
 
-            # The client tells us what singletons were rendered into
-            # the initial page
-            if (!is.null(msg$data$.clientdata_singletons)) {
-              shinysession$singletons <<- strsplit(
-                msg$data$.clientdata_singletons, ',')[[1]]
-            }
+              # The client tells us what singletons were rendered into
+              # the initial page
+              if (!is.null(msg$data$.clientdata_singletons)) {
+                shinysession$singletons <- strsplit(
+                  msg$data$.clientdata_singletons, ',')[[1]]
+              }
 
-            local({
-              args <- list(
-                input=shinysession$input,
-                output=.createOutputWriter(shinysession))
+              local({
+                args <- list(
+                  input=shinysession$input,
+                  output=.createOutputWriter(shinysession))
 
-              # The clientData and session arguments are optional; check if
-              # each exists
-              if ('clientData' %in% names(formals(serverFunc)))
-                args$clientData <- shinysession$clientData
+                # The clientData and session arguments are optional; check if
+                # each exists
+                if ('clientData' %in% names(formals(serverFunc)))
+                  args$clientData <- shinysession$clientData
 
-              if ('session' %in% names(formals(serverFunc)))
-                args$session <- shinysession$session
+                if ('session' %in% names(formals(serverFunc)))
+                  args$session <- shinysession
 
-              withReactiveDomain(shinysession$session, {
-                do.call(appvars$server, args)
+                withReactiveDomain(shinysession, {
+                  do.call(
+                    # No corresponding ..stacktraceoff; the server func is pure
+                    # user code
+                    wrapFunctionLabel(appvars$server, "server",
+                      ..stacktraceon = TRUE
+                    ),
+                    args
+                  )
+                })
               })
-            })
-          },
-          update = {
-            shinysession$manageInputs(msg$data)
-          },
-          shinysession$dispatch(msg)
-        )
-        shinysession$manageHiddenOutputs()
+            },
+            update = {
+              shinysession$manageInputs(msg$data)
+            },
+            shinysession$dispatch(msg)
+          )
+          shinysession$manageHiddenOutputs()
 
-        if (exists(".shiny__stdout", globalenv()) &&
-            exists("HTTP_GUID", ws$request)) {
-          # safe to assume we're in shiny-server
-          shiny_stdout <- get(".shiny__stdout", globalenv())
+          if (exists(".shiny__stdout", globalenv()) &&
+              exists("HTTP_GUID", ws$request)) {
+            # safe to assume we're in shiny-server
+            shiny_stdout <- get(".shiny__stdout", globalenv())
 
-          # eNter a flushReact
-          writeLines(paste("_n_flushReact ", get("HTTP_GUID", ws$request),
-                           " @ ", sprintf("%.3f", as.numeric(Sys.time())),
-                           sep=""), con=shiny_stdout)
-          flush(shiny_stdout)
+            # eNter a flushReact
+            writeLines(paste("_n_flushReact ", get("HTTP_GUID", ws$request),
+              " @ ", sprintf("%.3f", as.numeric(Sys.time())),
+              sep=""), con=shiny_stdout)
+            flush(shiny_stdout)
 
-          flushReact()
+            flushReact()
 
-          # eXit a flushReact
-          writeLines(paste("_x_flushReact ", get("HTTP_GUID", ws$request),
-                           " @ ", sprintf("%.3f", as.numeric(Sys.time())),
-                           sep=""), con=shiny_stdout)
-          flush(shiny_stdout)
-        } else {
-          flushReact()
-        }
-        lapply(appsByToken$values(), function(shinysession) {
-          shinysession$flushOutput()
-          NULL
+            # eXit a flushReact
+            writeLines(paste("_x_flushReact ", get("HTTP_GUID", ws$request),
+              " @ ", sprintf("%.3f", as.numeric(Sys.time())),
+              sep=""), con=shiny_stdout)
+            flush(shiny_stdout)
+          } else {
+            flushReact()
+          }
+          lapply(appsByToken$values(), function(shinysession) {
+            shinysession$flushOutput()
+            NULL
+          })
         })
+      }
+      ws$onMessage(function(binary, msg) {
+        # If unhandled errors occur, make sure they get properly logged
+        withLogErrors(messageHandler(binary, msg))
       })
 
       ws$onClose(function() {
-        shinysession$close()
+        shinysession$wsClosed()
         appsByToken$remove(shinysession$token)
       })
 
@@ -539,8 +468,8 @@ serviceApp <- function() {
 
 #' Run Shiny Application
 #'
-#' Runs a Shiny application. This function normally does not return; interrupt
-#' R to stop the application (usually by pressing Ctrl+C or Esc).
+#' Runs a Shiny application. This function normally does not return; interrupt R
+#' to stop the application (usually by pressing Ctrl+C or Esc).
 #'
 #' The host parameter was introduced in Shiny 0.9.0. Its default value of
 #' \code{"127.0.0.1"} means that, contrary to previous versions of Shiny, only
@@ -548,11 +477,20 @@ serviceApp <- function() {
 #' clients to connect, use the value \code{"0.0.0.0"} instead (which was the
 #' value that was hard-coded into Shiny in 0.8.0 and earlier).
 #'
-#' @param appDir The directory of the application. Should contain
-#'   \code{server.R}, plus, either \code{ui.R} or a \code{www} directory that
-#'   contains the file \code{index.html}. Defaults to the working directory.
-#' @param port The TCP port that the application should listen on. Defaults to
-#'   choosing a random port.
+#' @param appDir The application to run. Should be one of the following:
+#'   \itemize{
+#'   \item A directory containing \code{server.R}, plus, either \code{ui.R} or
+#'    a \code{www} directory that contains the file \code{index.html}.
+#'   \item A directory containing \code{app.R}.
+#'   \item An \code{.R} file containing a Shiny application, ending with an
+#'    expression that produces a Shiny app object.
+#'   \item A list with \code{ui} and \code{server} components.
+#'   \item A Shiny app object created by \code{\link{shinyApp}}.
+#'   }
+#' @param port The TCP port that the application should listen on. If the
+#'   \code{port} is not specified, and the \code{shiny.port} option is set (with
+#'   \code{options(shiny.port = XX)}), then that port will be used. Otherwise,
+#'   use a random port.
 #' @param launch.browser If true, the system's default web browser will be
 #'   launched automatically after the app is started. Defaults to true in
 #'   interactive sessions only. This value of this parameter can also be a
@@ -567,8 +505,8 @@ serviceApp <- function() {
 #'   the value \code{"showcase"}, shows application code and metadata from a
 #'   \code{DESCRIPTION} file in the application directory alongside the
 #'   application. If set to \code{"normal"}, displays the application normally.
-#'   Defaults to \code{"auto"}, which displays the application in the mode
-#'   given in its \code{DESCRIPTION} file, if any.
+#'   Defaults to \code{"auto"}, which displays the application in the mode given
+#'   in its \code{DESCRIPTION} file, if any.
 #'
 #' @examples
 #' \dontrun{
@@ -577,22 +515,37 @@ serviceApp <- function() {
 #'
 #' # Start app in a subdirectory called myapp
 #' runApp("myapp")
+#' }
+#'
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   # Apps can be run without a server.r and ui.r file
+#'   runApp(list(
+#'     ui = bootstrapPage(
+#'       numericInput('n', 'Number of obs', 100),
+#'       plotOutput('plot')
+#'     ),
+#'     server = function(input, output) {
+#'       output$plot <- renderPlot({ hist(runif(input$n)) })
+#'     }
+#'   ))
 #'
 #'
-#' # Apps can be run without a server.r and ui.r file
-#' runApp(list(
-#'   ui = bootstrapPage(
-#'     numericInput('n', 'Number of obs', 100),
-#'     plotOutput('plot')
-#'   ),
-#'   server = function(input, output) {
-#'     output$plot <- renderPlot({ hist(runif(input$n)) })
-#'   }
-#' ))
+#'   # Running a Shiny app object
+#'   app <- shinyApp(
+#'     ui = bootstrapPage(
+#'       numericInput('n', 'Number of obs', 100),
+#'       plotOutput('plot')
+#'     ),
+#'     server = function(input, output) {
+#'       output$plot <- renderPlot({ hist(runif(input$n)) })
+#'     }
+#'   )
+#'   runApp(app)
 #' }
 #' @export
 runApp <- function(appDir=getwd(),
-                   port=NULL,
+                   port=getOption('shiny.port'),
                    launch.browser=getOption('shiny.launch.browser',
                                             interactive()),
                    host=getOption('shiny.host', '127.0.0.1'),
@@ -618,7 +571,7 @@ runApp <- function(appDir=getwd(),
     # SHINY_SERVER_VERSION, those will return "" which is considered less than
     # any valid version.
     ver <- Sys.getenv('SHINY_SERVER_VERSION')
-    if (compareVersion(ver, .shinyServerMinVersion) < 0) {
+    if (utils::compareVersion(ver, .shinyServerMinVersion) < 0) {
       warning('Shiny Server v', .shinyServerMinVersion,
               ' or later is required; please upgrade!')
     }
@@ -632,9 +585,17 @@ runApp <- function(appDir=getwd(),
   # If appDir specifies a path, and display mode is specified in the
   # DESCRIPTION file at that path, apply it here.
   if (is.character(appDir)) {
-    desc <- file.path.ci(appDir, "DESCRIPTION")
+    # if appDir specifies a .R file (single-file Shiny app), look for the
+    # DESCRIPTION in the parent directory
+    desc <- file.path.ci(
+      if (tolower(tools::file_ext(appDir)) == "r")
+        dirname(appDir)
+      else
+        appDir, "DESCRIPTION")
     if (file.exists(desc)) {
-      settings <- read.dcf(desc)
+      con <- file(desc, encoding = checkEncoding(desc))
+      on.exit(close(con), add = TRUE)
+      settings <- read.dcf(con)
       if ("DisplayMode" %in% colnames(settings)) {
         mode <- settings[1,"DisplayMode"]
         if (mode == "Showcase") {
@@ -685,10 +646,12 @@ runApp <- function(appDir=getwd(),
   }
 
   appParts <- as.shiny.appobj(appDir)
-  if (!is.null(appParts$onStart))
-    appParts$onStart()
+  # Set up the onEnd before we call onStart, so that it gets called even if an
+  # error happens in onStart.
   if (!is.null(appParts$onEnd))
     on.exit(appParts$onEnd(), add = TRUE)
+  if (!is.null(appParts$onStart))
+    appParts$onStart()
 
   server <- startApp(appParts, port, host, quiet)
 
@@ -717,11 +680,15 @@ runApp <- function(appDir=getwd(),
 
   .globals$retval <- NULL
   .globals$stopped <- FALSE
-  shinyCallingHandlers(
-    while (!.globals$stopped) {
-      serviceApp()
-      Sys.sleep(0.001)
-    }
+  # Top-level ..stacktraceoff..; matches with ..stacktraceon in observe(),
+  # reactive(), Callbacks$invoke(), and others
+  ..stacktraceoff..(
+    captureStackTraces(
+      while (!.globals$stopped) {
+        serviceApp()
+        Sys.sleep(0.001)
+      }
+    )
   )
 
   return(.globals$retval)
@@ -736,7 +703,7 @@ runApp <- function(appDir=getwd(),
 #'   \code{\link{runApp}}.
 #'
 #' @export
-stopApp <- function(returnValue = NULL) {
+stopApp <- function(returnValue = invisible()) {
   .globals$retval <- returnValue
   .globals$stopped <- TRUE
   httpuv::interrupt()
@@ -760,15 +727,16 @@ stopApp <- function(returnValue = NULL) {
 #'   code or commentary.
 #'
 #' @examples
-#' \dontrun{
-#' # List all available examples
-#' runExample()
+#' ## Only run this example in interactive R sessions
+#' if (interactive()) {
+#'   # List all available examples
+#'   runExample()
 #'
-#' # Run one of the examples
-#' runExample("01_hello")
+#'   # Run one of the examples
+#'   runExample("01_hello")
 #'
-#' # Print the directory containing the code for all examples
-#' system.file("examples", package="shiny")
+#'   # Print the directory containing the code for all examples
+#'   system.file("examples", package="shiny")
 #' }
 #' @export
 runExample <- function(example=NA,

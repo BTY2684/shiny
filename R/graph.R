@@ -1,5 +1,11 @@
-writeReactLog <- function(file=stdout()) {
-  cat(RJSONIO::toJSON(.graphEnv$log, pretty=TRUE), file=file)
+writeReactLog <- function(file=stdout(), sessionToken = NULL) {
+  log <- .graphStack$as_list()
+  if (!is.null(sessionToken)) {
+    log <- Filter(function(x) {
+      is.null(x$session) || identical(x$session, sessionToken)
+    }, log)
+  }
+  cat(toJSON(log, pretty=TRUE), file=file)
 }
 
 #' Reactive Log Visualizer
@@ -37,15 +43,15 @@ writeReactLog <- function(file=stdout()) {
 #'
 #' @export
 showReactLog <- function() {
-  browseURL(renderReactLog())
+  utils::browseURL(renderReactLog())
 }
 
-renderReactLog <- function() {
+renderReactLog <- function(sessionToken = NULL) {
   templateFile <- system.file('www/reactive-graph.html', package='shiny')
   html <- paste(readLines(templateFile, warn=FALSE), collapse='\r\n')
   tc <- textConnection(NULL, 'w')
   on.exit(close(tc))
-  writeReactLog(tc)
+  writeReactLog(tc, sessionToken)
   cat('\n', file=tc)
   flush(tc)
   html <- sub('__DATA__', paste(textConnectionValue(tc), collapse='\r\n'), html, fixed=TRUE)
@@ -55,8 +61,13 @@ renderReactLog <- function() {
 }
 
 .graphAppend <- function(logEntry, domain = getDefaultReactiveDomain()) {
-  if (isTRUE(getOption('shiny.reactlog', FALSE)))
-    .graphEnv$log <- c(.graphEnv$log, list(logEntry))
+  if (isTRUE(getOption('shiny.reactlog'))) {
+    sessionToken <- if (is.null(domain)) NULL else domain$token
+    .graphStack$push(c(logEntry, list(
+      session = sessionToken,
+      time = as.numeric(Sys.time())
+    )))
+  }
 
   if (!is.null(domain)) {
     domain$reactlog(logEntry)
@@ -74,7 +85,7 @@ renderReactLog <- function() {
 .graphCreateContext <- function(id, label, type, prevId, domain) {
   .graphAppend(list(
     action='ctx', id=id, label=paste(label, collapse='\n'),
-    srcref=attr(label, "srcref"), srcfile=attr(label, "srcfile"),
+    srcref=as.vector(attr(label, "srcref")), srcfile=attr(label, "srcfile"),
     type=type, prevId=prevId
   ), domain = domain)
 }
@@ -91,7 +102,7 @@ renderReactLog <- function() {
   .graphAppend(list(
     action = 'valueChange',
     id = label,
-    value = paste(capture.output(str(value)), collapse='\n')
+    value = paste(utils::capture.output(utils::str(value)), collapse='\n')
   ))
 }
 
@@ -99,5 +110,5 @@ renderReactLog <- function() {
   .graphAppend(list(action='invalidate', id=id), domain)
 }
 
-.graphEnv <- new.env()
-.graphEnv$log <- list()
+#' @include stack.R
+.graphStack <- Stack$new()

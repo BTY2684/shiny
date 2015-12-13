@@ -82,7 +82,7 @@ absolutePanel <- function(...,
     return(tagList(
       # IMPORTANT NOTE: If you update jqueryui, make sure you DON'T include the datepicker,
       # as it collides with our bootstrap datepicker!
-      singleton(tags$head(tags$script(src='shared/jqueryui/1.10.4/jquery-ui.min.js'))),
+      singleton(tags$head(tags$script(src='shared/jqueryui/jquery-ui.min.js'))),
       divTag,
       tags$script('$(".draggable").draggable();')
     ))
@@ -97,8 +97,8 @@ fixedPanel <- function(...,
                        top = NULL, left = NULL, right = NULL, bottom = NULL,
                        width = NULL, height = NULL,
                        draggable = FALSE,
-                       cursor = c('move', 'default', 'inherit')) {
+                       cursor = c('auto', 'move', 'default', 'inherit')) {
   absolutePanel(..., top=top, left=left, right=right, bottom=bottom,
-                width=width, height=height, draggable=draggable, cursor=cursor,
+                width=width, height=height, draggable=draggable, cursor=match.arg(cursor),
                 fixed=TRUE)
 }

@@ -20,18 +20,19 @@
 # form upload, i.e. traditional HTTP POST-based file upload) doesn't work with
 # the websockets package's HTTP server at the moment.
 
-FileUploadOperation <- setRefClass(
+FileUploadOperation <- R6Class(
   'FileUploadOperation',
-  fields = list(
-    .parent = 'ANY',
-    .id = 'character',
-    .files = 'data.frame',
-    .dir = 'character',
-    .currentFileInfo = 'list',
-    .currentFileData = 'ANY',
-    .pendingFileInfos = 'list'
-  ),
-  methods = list(
+  portable = FALSE,
+  class = FALSE,
+  public = list(
+    .parent = NULL,
+    .id = character(0),
+    .files = data.frame(),
+    .dir = character(0),
+    .currentFileInfo = list(),
+    .currentFileData = NULL,
+    .pendingFileInfos = list(),
+
     initialize = function(parent, id, dir, fileInfos) {
       .parent <<- parent
       .id <<- id
@@ -78,33 +79,49 @@ FileUploadOperation <- setRefClass(
 )
 
 #' @include map.R
-FileUploadContext <- setRefClass(
+FileUploadContext <- R6Class(
   'FileUploadContext',
-  fields = list(
-    .basedir = 'character',
-    .operations = 'Map'
+  class = FALSE,
+  private = list(
+    basedir = character(0),
+    operations = 'Map',
+    ids = character(0)  # Keep track of all ids used for file uploads
   ),
-  methods = list(
+  public = list(
     initialize = function(dir=tempdir()) {
-      .basedir <<- dir
+      private$basedir <- dir
+      private$operations <- Map$new()
     },
     createUploadOperation = function(fileInfos) {
       while (TRUE) {
         id <- paste(as.raw(p_runif(12, min=0, max=0xFF)), collapse='')
-        dir <- file.path(.basedir, id)
+        private$ids <- c(private$ids, id)
+        dir <- file.path(private$basedir, id)
         if (!dir.create(dir))
           next
 
-        op <- FileUploadOperation$new(.self, id, dir, fileInfos)
-        .operations$set(id, op)
+        op <- FileUploadOperation$new(self, id, dir, fileInfos)
+        private$operations$set(id, op)
         return(id)
       }
     },
     getUploadOperation = function(jobId) {
-      .operations$get(jobId)
+      private$operations$get(jobId)
     },
     onJobFinished = function(jobId) {
-      .operations$remove(jobId)
+      private$operations$remove(jobId)
+    },
+    # Remove the directories containing file uploads; this is to be called when
+    # a session ends.
+    rmUploadDirs = function() {
+      # Make sure all_paths is underneath the tempdir()
+      if (!grepl(normalizePath(tempdir()), normalizePath(private$basedir), fixed = TRUE)) {
+        stop("Won't remove upload path ", private$basedir,
+          "because it is not under tempdir(): ", tempdir())
+      }
+
+      all_paths <- file.path(private$basedir, private$ids)
+      unlink(all_paths, recursive = TRUE)
     }
   )
 )
